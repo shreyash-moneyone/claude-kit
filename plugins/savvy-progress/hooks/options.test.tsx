@@ -89,7 +89,7 @@ for (const surface of SURFACES) {
 
     await spawn($, 'a1')
     const b = await crewButton($, surface)
-    expect(b.label).toBe('×1')
+    expect(b.label).toBe('Show panel ▸')
     expect(b.hasDismiss).toBe(true)
     expect(b.svg).toBe(surface === 'desktop' ? 1 : 0)
   })
@@ -97,12 +97,12 @@ for (const surface of SURFACES) {
   test(`${surface}: band "agents" dismissed stays hidden until the next spawn`, { options: { band: 'agents' } }, async ($, on) => {
     await ran($, on)
     const shown = await crewButton($, surface)
-    expect(shown.label).toBe('×1')
+    expect(shown.label).toBe('Show panel ▸')
     await shown.ui.press({ key: 'savvy-dismiss' })
     expect((await crewButton($, surface)).label).toBeUndefined()
 
     await spawn($, 'a2')
-    expect((await crewButton($, surface)).label).toBe('×2')
+    expect((await crewButton($, surface)).label).toBe('Show panel ▸')
   })
 
   test(`${surface}: band "agents" leaves the flow band as it is`, { options: { band: 'agents' } }, async ($, on) => {
@@ -115,7 +115,7 @@ for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
     const flowTexts = await ui.findAll({ type: 'Text', text: /^Tasks 1\/4$/ })
     expect(flowTexts.length).toBe(surface === 'terminal' ? 1 : 0)
-    expect((await ui.find({ key: 'savvy-agents' }))?.props.label).toBe('×1')
+    expect((await ui.find({ key: 'savvy-agents' }))?.props.label).toBe('Show panel ▸')
   })
 
   test(`${surface}: band "agents" dismissing the flow band hides both bands until the next spawn`, { options: { band: 'agents' } }, async ($, on) => {
@@ -136,6 +136,6 @@ for (const surface of SURFACES) {
     expect(await hidden.ui.findAll({ type: 'Text', text: /^Tasks 1\/4$/ })).toHaveLength(0)
 
     await spawn($, 'a2')
-    expect((await crewButton($, surface)).label).toBe('×2')
+    expect((await crewButton($, surface)).label).toBe('Show panel ▸')
   })
 }

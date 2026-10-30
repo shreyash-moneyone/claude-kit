@@ -56,11 +56,13 @@ const panel = async ($: Engine, surface: Surface) => {
   return { ...found, drawn: (re: RegExp) => Boolean(found.drawn.find(([src]) => src === re.source)?.[1]) }
 }
 
-const crew = async ($: Engine, surface: Surface) => {
+// Whether the band's counts line reads exactly `text`.
+const counts = async ($: Engine, surface: Surface, text: string) => {
   const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
-  const label = (await ui.find({ key: 'savvy-agents' }))?.props.label as string | undefined
+  const svg = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).join('\n')
+  const isShown = surface === 'desktop' ? svg.includes(`>${text}<`) : (await ui.find({ type: 'Text', text: new RegExp(`^${text}$`) })) !== undefined
   await ui.unmount()
-  return label
+  return isShown
 }
 
 for (const surface of SURFACES) {
@@ -119,9 +121,9 @@ for (const surface of SURFACES) {
     await spawn($, 'a1')
     await finish($, 'a1')
     await spawn($, 'a2')
-    expect(await crew($, surface)).toBe('×2')
+    expect(await counts($, surface, '1 running · 1 done')).toBe(true)
     await close($)
-    expect(await crew($, surface)).toBe('×1')
+    expect(await counts($, surface, '1 running')).toBe(true)
   })
 
   // The cut is who had finished at the close, not when: the same clock tick must not hide a later finisher.

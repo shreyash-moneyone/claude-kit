@@ -78,6 +78,11 @@ const STRINGS = {
     review: 'Review',
     busy: 'running',
     ctx: 'ctx',
+    showPanel: 'Show panel ▸',
+    hidePanel: 'Hide panel ◂',
+    runningWord: 'running',
+    doneWord: 'done',
+    noneRunning: 'No agents running',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -109,6 +114,11 @@ const STRINGS = {
     review: 'Ревью',
     busy: 'в работе',
     ctx: 'ctx',
+    showPanel: 'Показать панель ▸',
+    hidePanel: 'Скрыть панель ◂',
+    runningWord: 'в работе',
+    doneWord: 'готово',
+    noneRunning: 'Нет работающих агентов',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -140,6 +150,11 @@ const STRINGS = {
     review: 'בדיקה',
     busy: 'בעבודה',
     ctx: 'הקשר',
+    showPanel: 'הצג חלונית ◂',
+    hidePanel: 'הסתר חלונית ▸',
+    runningWord: 'בעבודה',
+    doneWord: 'הושלמו',
+    noneRunning: 'אין סוכנים בעבודה',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
   },
@@ -350,22 +365,49 @@ ${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, 
 </svg>`
 }
 
-// The band without a flow: the panel's name and the crab, in a drawing as wide as they are.
-const crewRowSvg = (isWorking: boolean): { source: string; width: number } => {
-  const text = tr().pane
-  const W = Math.ceil(16 + textWidth(text, 13) + 10 + CRAB_W)
-  const rtl = isRtl()
-  const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
+// The crew line of the band without a flow: "2 running · 5 done", or that there is nothing running.
+const crewText = (running: number, done: number): string => {
+  const s = tr()
+  const parts = [running ? `${running} ${s.runningWord}` : '', done ? `${done} ${s.doneWord}` : ''].filter(Boolean)
+  return parts.length ? parts.join(' · ') : s.noneRunning
+}
+
+const MAX_CRABS = 5
+// Cells a button adds around its label.
+const BUTTON_PAD = 4
+const CRAB_SLOT = 26
+
+// The band without a flow, in one drawing as wide as it needs: a dot that pulses while anything runs, the
+// panel's name, one small crab per running agent (a dimmed one when none runs), and the counts.
+const crewRowSvg = (running: AgentRun[], done: number, isRotating: boolean): { source: string; width: number } => {
+  const label = tr().pane
+  const counts = crewText(running.length, done)
+  const shown = running.slice(0, MAX_CRABS)
+  const more = running.length - shown.length
+  const crabsX = Math.ceil(16 + textWidth(label, 13) + 12)
+  const moreX = crabsX + Math.max(1, shown.length) * CRAB_SLOT + 2
+  const countsX = Math.ceil(moreX + (more ? textWidth(`+${more}`, 12) + 8 : 0))
+  const W = Math.ceil(countsX + textWidth(counts, 12) + 4)
   const crabW = CRAB_BOX * 0.8
-  const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-<style>
-.t{fill:#1f1f1f}
-@media (prefers-color-scheme: dark){.t{fill:#ececec}}
-</style>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${ACCENT}"/>
-<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(text)}</text>
-${CRAB_CSS}${crab(rtl ? 1 : W - CRAB_W + 1, 0, 'other', false, isWorking, 0.8, rtl)}
-</svg>`
+  const crabs = shown.length
+    ? shown
+        .map((a, i) => {
+          const look = lookOf(a, isRotating)
+          return crab(mx(W, crabsX + i * CRAB_SLOT, crabW), 0, look.costume, false, true, 0.8, isRtl(), look.color)
+        })
+        .join('')
+    : crab(mx(W, crabsX, crabW), 0, 'other', true, false, 0.8, isRtl())
+  const dot = running.length
+    ? `<circle class="live" cx="${mx(W, 5)}" cy="${H / 2}" r="4" fill="${ACCENT}"/>`
+    : `<circle cx="${mx(W, 5)}" cy="${H / 2}" r="4" fill="#9a9a96"/>`
+  const source = svg(
+    W,
+    H,
+    `${dot}
+<text class="t" ${startText(W, 16, H / 2 + 4.5)} font-family="${FONT}" font-size="13" font-weight="500">${xml(label)}</text>
+${crabs}${more ? `<text class="s" ${startText(W, moreX, H / 2 + 4, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}
+<text class="s" ${startText(W, countsX, H / 2 + 4)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${xml(counts)}</text>`,
+  )
   return { source, width: W }
 }
 
@@ -834,6 +876,15 @@ const ctxBar = (pct: number, width: number): string => {
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
+// Whether the agents pane is up, as `togglePane` decides it.
+const isPaneOpen = async ($: EngineInterface): Promise<boolean> => {
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE)
+  } catch {
+    return false
+  }
+}
+
 // Opens the agents pane, or closes it when it is up; true when it ends up open.
 async function togglePane($: EngineInterface): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
@@ -1110,6 +1161,8 @@ export const register: Register = (on, options) => {
   // An unload is the engine dropping the pane, not the person finishing with it.
   on('ui.close', async ($, e, next) => {
     const closed = await next(e)
+    // The pane list is not reactive: ask the band to draw again so its toggle label follows.
+    if (e.id === PANE) $.ui.invalidate('ui.render')
     if (e.id === PANE && e.origin.kind !== 'unload' && options.finished === 'clear-on-close') {
       const all = await read($, agents)
       const present = new Set(all.map(a => a.id))
@@ -1119,6 +1172,13 @@ export const register: Register = (on, options) => {
       }))
     }
     return closed
+  })
+
+  // Likewise when the pane opens by any route (the band's button, `/agents-info`, an auto-open).
+  on('ui.open', async ($, e, next) => {
+    const opened = await next(e)
+    if (e.id === PANE) $.ui.invalidate('ui.render')
+    return opened
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -1314,10 +1374,23 @@ export const register: Register = (on, options) => {
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const crew = list.length + (f ? plannedOf(f, all).length : 0)
-    const isWorking = list.some(a => a.status === 'running')
+    const isRotating = options.costumes === 'rotate'
+    const running = list.filter(a => a.status === 'running')
+    const isWorking = running.length > 0
+    const isOpen = await isPaneOpen($)
+    // A labelled toggle, not a bare count: it names what a press does, for the pane as it stands now.
+    const toggleLabel = isOpen ? tr().hidePanel : tr().showPanel
+    // The row's budget is for the longer of the two labels, so the band does not reflow when it flips.
+    const toggleCells = Math.max([...tr().showPanel].length, [...tr().hidePanel].length) + BUTTON_PAD
     const crewButton = (
-      <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
+      <Button
+        key="savvy-agents"
+        label={toggleLabel}
+        onPress={async () => {
+          await togglePane($)
+          $.ui.invalidate('ui.render')
+        }}
+      />
     )
     const dismiss = (
       <Button
@@ -1337,11 +1410,11 @@ export const register: Register = (on, options) => {
       // No flow: the panel's name, the crew button and the dismiss.
       if (isSvg) {
         const { Svg } = ui
-        const row = crewRowSvg(isWorking)
+        const row = crewRowSvg(running, list.length - running.length, isRotating)
         return (
           <Box flexDirection="column">
             <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
-              <Svg source={row.source} alt={`${tr().pane}: ${crew}`} width={row.width} height={H} />
+              <Svg source={row.source} alt={`${tr().pane}: ${crewText(running.length, list.length - running.length)}`} width={row.width} height={H} />
               {crewButton}
               {dismiss}
             </Box>
@@ -1352,9 +1425,20 @@ export const register: Register = (on, options) => {
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={2}>
-            <Text color={ACCENT}>● </Text>
+            <Text color={isWorking ? ACCENT : undefined} dimColor={!isWorking}>
+              ●
+            </Text>
             <Text bold>{tr().pane}</Text>
-            <Text color={CLAY}>▣</Text>
+            <Box flexDirection="row" gap={1}>
+              {running.slice(0, MAX_CRABS).map(a => (
+                <Text key={a.id} color={lookOf(a, isRotating).color}>
+                  ▣
+                </Text>
+              ))}
+              {!isWorking && <Text dimColor>▣</Text>}
+              {running.length > MAX_CRABS && <Text dimColor>+{running.length - MAX_CRABS}</Text>}
+            </Box>
+            <Text dimColor>{crewText(running.length, list.length - running.length)}</Text>
             {crewButton}
             {dismiss}
           </Box>
@@ -1369,7 +1453,7 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
-      const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
+      const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - (toggleCells + 8) * 8))
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
@@ -1384,7 +1468,9 @@ export const register: Register = (on, options) => {
 
     const cols = e.props.bodyColumns
     const titleW = Math.max(8, Math.min(30, f.title.length + 2, Math.floor(cols / 3)))
-    const width = Math.max(6, Math.min(40, cols - titleW - 32))
+    // Beside the title and the bar: six 2-cell gaps, the label, the percent, the crab, the button and the ✕.
+    const reserved = 12 + label(f).length + percent.length + 1 + toggleCells + 3
+    const width = Math.max(6, Math.min(40, cols - titleW - reserved))
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={2}>

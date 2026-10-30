@@ -2,7 +2,7 @@
 
 A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.
 
-- **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts (with the `band` option, also for any subagent).
+- **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a `Show panel ▸` / `Hide panel ◂` button for the agents panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts (with the `band` option, also for any subagent).
 - **Agents panel** (`/agents-info` toggles it; `/agents-info open` opens it or brings it forward without toggling): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
 
 ## Tools it adds
@@ -24,9 +24,9 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 `cost`: `show` (default) or `hide`. With `hide`, no dollar figure is drawn: the panel's summary, each agent's row and the collapsed panel keep tokens, context and time only. Handy on a subscription, where the estimate is noise.
 
-`band`: `flow` (default) or `agents`. With `flow` the band above the prompt appears only when a savvy-flow plan is reported or a `savvy-*` worker starts. With `agents` it also appears, compact (the word "Agents", the crew button that toggles the panel, and ✕), as soon as any subagent has run, with no flow needed. Its ✕ hides it until the next subagent starts. When a flow exists the band is the usual one.
+`band`: `flow` (default) or `agents`. With `flow` the band above the prompt appears only when a savvy-flow plan is reported or a `savvy-*` worker starts. With `agents` it also appears, compact (a dot that pulses while anything runs, the word "Agents", a small crab per running agent, `2 running · 5 done`, the panel button, and ✕), as soon as any subagent has run, with no flow needed. Its ✕ hides it until the next subagent starts. When a flow exists the band is the usual one.
 
-`finished`: `keep` (default) or `clear-on-close`. With `clear-on-close`, closing the panel (its close mark, `/agents-info`, or the `×N` button) clears the agents that have finished by then from its list: the Finished section, its count, the collapsed crab row and the `×N` count. Running agents stay, agents that finish later show normally, and the header totals still cover every agent of the session. The panel being dropped by the engine (unload) does not clear anything.
+`finished`: `keep` (default) or `clear-on-close`. With `clear-on-close`, closing the panel (its close mark, `/agents-info`, or the band's panel button) clears the agents that have finished by then from its list: the Finished section, its count, the collapsed crab row and the band's counts. Running agents stay, agents that finish later show normally, and the header totals still cover every agent of the session. The panel being dropped by the engine (unload) does not clear anything.
 
 `costumes`: `savvy` (default) or `rotate`. With `savvy` a crab's costume and colour come from the savvy-flow tier (an `Explore` agent keeps the pirate). With `rotate` every agent is dealt one of the tier costumes in turn when it spawns (`Explore` still keeps the pirate) and keeps it, and its colour follows the model family instead of the tier: Haiku, Sonnet, Opus and Fable each have their own, an unknown model stays grey.
 
