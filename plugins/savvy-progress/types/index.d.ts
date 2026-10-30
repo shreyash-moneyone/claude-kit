@@ -40,12 +40,26 @@ export type AgentRun = {
   stepDone?: number
   stepTotal?: number
   stepNote?: string
+  /** `activity: "on"`: the first lines of the worker's prompt, credentials masked. */
+  brief?: string
+  /** `activity: "on"`: the worker's last tool calls, oldest first, at most 10. */
+  activity?: Activity[]
+  /** `activity: "on"`: the first lines of the latest answer; unset while the run works. */
+  result?: string
+}
+
+/** One tool call of a worker: when it was made and a masked, one-line summary. */
+export type Activity = {
+  at: number
+  text: string
 }
 
 export type Panel = {
   isCompact: boolean
   isDoneCollapsed: boolean
   autoOpenedFor: string
+  /** `activity: "on"`: the run whose details are open, `''` for none. */
+  expandedId?: string
 }
 
 /** The compact band shown without a flow (`band: "agents"`): hidden by its dismiss until the next subagent spawns. */

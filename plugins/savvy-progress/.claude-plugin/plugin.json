@@ -69,6 +69,16 @@
         "savvy",
         "rotate"
       ]
+    },
+    "activity": {
+      "type": "string",
+      "title": "Agent activity",
+      "description": "off: rows show progress only; on: each agent row in the agents panel opens to its brief, last tool calls, step note and result (credentials masked)",
+      "default": "off",
+      "options": [
+        "off",
+        "on"
+      ]
     }
   },
   "homepage": "https://github.com/johnnyvizz/claude-kit/tree/main/plugins/savvy-progress",

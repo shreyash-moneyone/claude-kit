@@ -798,6 +798,95 @@ const progressOf = (a: AgentRun): number | null => {
 
 const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
 
+// ---------------------------------------------------------------------------
+// Activity (`activity: "on"`): what a worker did, kept on its run and drawn on request. Everything a
+// worker wrote goes through `safe` first: credentials are masked, then the text is cut, never the other
+// way round, or a cut could leave the head of a secret behind. Nothing here is logged or sent anywhere.
+
+const MASK = '•••'
+const MAX_TEXT = 80
+const MAX_LINES = 3
+const MAX_CALLS = 10
+// Text is looked at up to here: a prompt or a command can be as long as the model likes.
+const MAX_RAW = 4000
+
+// A value after `key=`: a quoted string (spaces and all, an unclosed one runs to the end) or a run up to a space or quote.
+const VALUE = `"[^"]*"?|'[^']*'?|[^\\s'"]+`
+const SECRET_KEY = 'password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth|key'
+
+// What is masked, in order: each rule keeps the words around the secret and replaces the secret.
+const MASKS: [RegExp, string][] = [
+  // postgres://user:pass@host
+  [/(:\/\/[^\s:@/]+:)\S*@/g, `$1${MASK}@`],
+  // Authorization: Basic …, "Authorization": "Bearer …"; the rest of the header goes.
+  [/(\bAuthorization["']?[ \t]*[:=][ \t]*)(?:"[^"]*"|'[^']*'|[^\r\n'"]*)/gi, `$1${MASK}`],
+  [/\b(Bearer[ \t]+)[^\s'"]+/gi, `$1${MASK}`],
+  // mysql -pS3cret and mysql -p S3cret; only after the mysql family, so `mkdir -p dir` stays.
+  [/\b((?:mysql|mysqldump|mariadb)\b[^\n|;&]*?[ \t]-p[ \t]*)(?!-)\S+/g, `$1${MASK}`],
+  [/(--passw(?:or)?d[ \t]+)(?![-\s])\S+/gi, `$1${MASK}`],
+  // key=value, key: value, "key": "value"; a longer name that ends in one (PGPASSWORD, GITHUB_TOKEN) counts.
+  [new RegExp(`\\b([\\w.-]*?(?:${SECRET_KEY}))(["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gi'), `$1$2${MASK}`],
+  // Keys that announce themselves: sk-…, ghp_…, github_pat_…, xoxb-…, AKIA….
+  [/\b(?:sk-[A-Za-z0-9_-]{8,}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{6,}|AKIA[0-9A-Z]{16})/g, MASK],
+]
+
+// A long run of base64 or hex with letters and digits is taken for a key, unless it reads as a path.
+const BLOB = /[A-Za-z0-9+/_=-]{32,}/g
+const isBlob = (run: string): boolean =>
+  /\d/.test(run) && /[A-Za-z]/.test(run) && !(run.includes('/') && run.split('/').every(part => part.length <= 24))
+
+const mask = (s: string): string => MASKS.reduce((t, [re, to]) => t.replace(re, to), s.slice(0, MAX_RAW)).replace(BLOB, run => (isBlob(run) ? MASK : run))
+
+// Mask, then cut.
+const safe = (s: string, max: number): string => clip(mask(s), max)
+
+// The first three non-empty lines, each cut to 80; undefined when there are none. Masked as a whole first, so a secret that spans lines goes.
+const linesOf = (s: unknown): string | undefined => {
+  const lines = mask(typeof s === 'string' ? s : '')
+    .split(/\r\n|\r|\n/)
+    .map(l => l.trim())
+    .filter(Boolean)
+    .slice(0, MAX_LINES)
+    .map(l => clip(l, MAX_TEXT))
+  return lines.length ? lines.join('\n') : undefined
+}
+
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host
+  } catch {
+    return ''
+  }
+}
+
+// One call as a line: `Bash: npm test`, `Read register.tsx`, `srv tool`; the bare tool name when there is nothing to say.
+const callText = (e: Record<string, unknown>): string => {
+  const tool = String(e.tool ?? '')
+  const s = (k: string): string => (typeof e[k] === 'string' ? e[k] : '')
+  const name = (path: string): string => path.split(/[\\/]/).pop() ?? ''
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
+  const label = mcp ? `${mcp[1]} ${mcp[2]}` : tool
+  const arg =
+    tool === 'Bash' ? s('command')
+    : tool === 'Agent' ? s('description')
+    : tool === 'Read' || tool === 'Edit' || tool === 'Write' ? name(s('file_path'))
+    : tool === 'NotebookEdit' ? name(s('notebook_path'))
+    : tool === 'Grep' || tool === 'Glob' ? s('pattern')
+    : tool === 'WebFetch' ? hostOf(s('url'))
+    : tool === 'WebSearch' ? s('query')
+    : ''
+  return arg ? `${label}${tool === 'Bash' || tool === 'Agent' ? ':' : ''} ${arg}` : label
+}
+
+// The entry's text: masked, on one line, cut. A call that cannot be summed up is still named.
+const callEntry = (e: Record<string, unknown>): string => {
+  try {
+    return clip(mask(callText(e)).replace(/\s+/g, ' ').trim(), MAX_TEXT)
+  } catch {
+    return safe(String(e.tool ?? ''), MAX_TEXT)
+  }
+}
+
 const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean, isRotating: boolean): string => {
   const s = tr()
   const tier = tierOf(a.type)
@@ -988,6 +1077,23 @@ export const register: Register = (on, options) => {
     return { text: isOpen ? tr().opened : tr().closed }
   })
 
+  // Every worker call goes on its run's list while `activity` is on. This hook stands first, so it sees each call; it only
+  // writes `agents`, and only when the worker has a row, and always hands the call on as it came.
+  on('tool.call', async ($, e, next) => {
+    const agentId = e.agentId
+    if (options.activity === 'on' && agentId && e.tool !== TOOL && e.tool !== STEP_TOOL) {
+      try {
+        if ((await read($, agents)).some(a => a.agentId === agentId)) {
+          const entry = { at: await $.clock.now(), text: callEntry(e as unknown as Record<string, unknown>) }
+          await update($, agents, list => list.map(a => (a.agentId !== agentId ? a : { ...a, activity: [...(a.activity ?? []), entry].slice(-MAX_CALLS) })))
+        }
+      } catch {
+        // A record that fails is a line missing from a panel, never a worker's call refused.
+      }
+    }
+    return next(e)
+  })
+
   on('tool.call', { tool: TOOL }, async ($, e) => {
     // The flow is the main session's: a call from a worker's loop carries its agentId
     // and changes nothing, or any subagent could rename, finish or reset the flow.
@@ -1015,7 +1121,8 @@ export const register: Register = (on, options) => {
         matched = true
         const total = Math.max(0, Math.round(input.total ?? a.stepTotal ?? 0))
         const done = Math.max(0, Math.round(input.done ?? a.stepDone ?? 0))
-        return { ...a, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNote: input.note?.trim() || undefined }
+        const note = input.note?.trim()
+        return { ...a, stepTotal: total, stepDone: total ? Math.min(total, done) : done, stepNote: (options.activity === 'on' && note ? safe(note, MAX_TEXT) : note) || undefined }
       }),
     )
     return { result: matched ? 'ok' : `ignored: no panel row for agent ${agentId}` }
@@ -1043,6 +1150,8 @@ export const register: Register = (on, options) => {
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
+    // The brief is the worker's own prompt, before the step-report line was added to it.
+    const brief = options.activity === 'on' ? linesOf(e.prompt) : undefined
     // `costumes: "rotate"`: deal the next tier costume, in spawn order; Explore keeps its own.
     let costume: string | undefined
     if (options.costumes === 'rotate') {
@@ -1069,6 +1178,7 @@ export const register: Register = (on, options) => {
         steps: 0,
         round,
         costume,
+        ...(brief ? { brief } : {}),
       }
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
@@ -1105,6 +1215,8 @@ export const register: Register = (on, options) => {
               effort: typeof e.effort === 'string' ? e.effort : a.effort,
               status: 'running',
               endedAt: undefined,
+              // The run answers again: its old result is not this turn's.
+              ...(options.activity === 'on' ? { result: undefined } : {}),
               contextTokens:
                 (usage.input_tokens || 0) +
                 (usage.cache_read_input_tokens || 0) +
@@ -1138,6 +1250,7 @@ export const register: Register = (on, options) => {
             ...a,
             status: e.reason === 'answer' ? 'done' : 'failed',
             endedAt: at,
+            ...(options.activity === 'on' ? { result: e.reason === 'answer' ? linesOf(e.answer) : undefined } : {}),
             ...(fallback && e.usage
               ? {
                   model: e.usage.model || a.model,
