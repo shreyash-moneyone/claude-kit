@@ -26,4 +26,8 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 `band`: `flow` (default) or `agents`. With `flow` the band above the prompt appears only when a savvy-flow plan is reported or a `savvy-*` worker starts. With `agents` it also appears, compact (the word "Agents", the crew button that toggles the panel, and ✕), as soon as any subagent has run, with no flow needed. Its ✕ hides it until the next subagent starts. When a flow exists the band is the usual one.
 
+`finished`: `keep` (default) or `clear-on-close`. With `clear-on-close`, closing the panel (its close mark, `/agents-info`, or the `×N` button) clears the agents that have finished by then from its list: the Finished section, its count, the collapsed crab row and the `×N` count. Running agents stay, agents that finish later show normally, and the header totals still cover every agent of the session. The panel being dropped by the engine (unload) does not clear anything.
+
+`costumes`: `savvy` (default) or `rotate`. With `savvy` a crab's costume and colour come from the savvy-flow tier (an `Explore` agent keeps the pirate). With `rotate` every agent is dealt one of the tier costumes in turn when it spawns (`Explore` still keeps the pirate) and keeps it, and its colour follows the model family instead of the tier: Haiku, Sonnet, Opus and Fable each have their own, an unknown model stays grey.
+
 Install instructions are in the [repository README](../../README.md).

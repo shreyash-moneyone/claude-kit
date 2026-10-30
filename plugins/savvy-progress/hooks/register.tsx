@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, CrewBand, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, Cleared, CrewBand, Flow, Panel, Phase, PlannedTask, Rotation } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -11,6 +11,8 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   autoOpenedFor: '',
 })
 const crewBand = atom({ plugin: 'savvy-progress', key: 'crewBand' } as const, { isDismissed: false })
+const cleared = atom({ plugin: 'savvy-progress', key: 'cleared' } as const, { ids: [] } as Cleared)
+const rotation = atom({ plugin: 'savvy-progress', key: 'rotation' } as const, { next: 0 } as Rotation)
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
 const TOOL = 'mcp__savvy-progress__progress'
@@ -497,6 +499,24 @@ const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
 }
 
+// The ids a clear hides. A value stored by an older version (`{ at }`) has none.
+const clearedIds = (c: Cleared): readonly string[] => (Array.isArray(c.ids) ? c.ids : [])
+
+// The runs the panel lists: with `finished: "clear-on-close"`, those that had finished at the last
+// close drop out. A running agent is never hidden. Totals and the planned tasks still look at every run.
+// A run that is not running again is new to the panel: its id leaves the cleared set.
+const unclear = async ($: EngineInterface, ids: string[]): Promise<void> => {
+  if (!ids.length) return
+  if (!clearedIds(await read($, cleared)).some(id => ids.includes(id))) return
+  await update($, cleared, prev => ({ ids: clearedIds(prev).filter(id => !ids.includes(id)) }))
+}
+
+const visibleOf = (list: AgentRun[], hidden: readonly string[]): AgentRun[] => {
+  if (!hidden.length) return list
+  const ids = new Set(hidden)
+  return list.filter(a => a.status === 'running' || !ids.has(a.id))
+}
+
 const totals = (list: AgentRun[], at: number) => {
   const cost = list.reduce((s, a) => s + a.costUsd, 0)
   const tokens = list.reduce((s, a) => s + a.tokens, 0)
@@ -639,19 +659,34 @@ const COSTUMES: Record<string, (f: Fill, t: string) => void> = {
 
 const costumeOf = (type: string): string => (type === 'Explore' ? 'explore' : tierOf(type))
 
+// `costumes: "rotate"` colours by model family, not tier; an unknown model keeps the neutral grey.
+const FAMILY_COLOR: [RegExp, string][] = [
+  [/fable|mythos/i, colorOf('fable')],
+  [/opus/i, colorOf('heavy')],
+  [/sonnet/i, colorOf('medium')],
+  [/haiku/i, colorOf('light')],
+]
+
+// The costume and colour a run is drawn with. Under `rotate` the costume was dealt at spawn
+// (a run from before the option was set falls back to its tier's).
+const lookOf = (a: AgentRun, isRotating: boolean): { costume: string; color: string } =>
+  isRotating
+    ? { costume: a.costume ?? costumeOf(a.type), color: FAMILY_COLOR.find(([re]) => re.test(a.model))?.[1] ?? colorOf('other') }
+    : { costume: costumeOf(a.type), color: colorOf(tierOf(a.type)) }
+
 const CRAB_SCALE = 1.1
 
 // Body and props nest inside `bd` so a prop rides the bob and adds its own motion;
 // legs stay outside it and step on their own. `mirror` flips the crab inside its
 // own box (x .. x + CRAB_BOX * scale) so it faces left.
-const crab = (x: number, y: number, costume: string, dim = false, isWalking = false, scale = CRAB_SCALE, mirror = false): string => {
+const crab = (x: number, y: number, costume: string, dim = false, isWalking = false, scale = CRAB_SCALE, mirror = false, accent = colorOf(costume)): string => {
   const groups = new Map<string, string[]>([['bd', []]])
   const f: Fill = (cx, cy, w, h, c, cls = 'bd') => {
     if (!groups.has(cls)) groups.set(cls, [])
     groups.get(cls)?.push(`<rect x="${cx}" y="${cy}" width="${w}" height="${h}" fill="${c}"/>`)
   }
   const draw = COSTUMES[costume] ?? ((g: Fill) => crabBody(g))
-  draw(f, colorOf(costume))
+  draw(f, accent)
   const group = (cls: string) => `<g class="${cls}">${(groups.get(cls) ?? []).join('')}</g>`
   const props = [...groups.keys()].filter(k => k !== 'bd' && k !== 'la' && k !== 'lb')
   const body = `<g class="bd">${(groups.get('bd') ?? []).join('')}${props.map(group).join('')}</g>`
@@ -685,8 +720,8 @@ const endText = (W: number, x: number, y: number, words = false): string =>
 const crabWidth = (scale: number): number => Math.round(CRAB_BOX * scale * 100) / 100
 
 // A panel crab at x in a row of width W: on the mirrored side and facing left in Hebrew.
-const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, isWalking = false): string =>
-  crab(mx(W, x, crabWidth(CRAB_SCALE)), y, costume, dim, isWalking, CRAB_SCALE, isRtl())
+const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, isWalking = false, accent = colorOf(costume)): string =>
+  crab(mx(W, x, crabWidth(CRAB_SCALE)), y, costume, dim, isWalking, CRAB_SCALE, isRtl(), accent)
 
 const svg = (W: number, H: number, body: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
@@ -721,10 +756,10 @@ const progressOf = (a: AgentRun): number | null => {
 
 const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
 
-const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean): string => {
+const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean, isRotating: boolean): string => {
   const s = tr()
   const tier = tierOf(a.type)
-  const color = colorOf(tier)
+  const { costume, color } = lookOf(a, isRotating)
   const ctx = ctxOf(a)
   const textW = W - 42 - 22
   const meta = [runModel(a)]
@@ -740,7 +775,7 @@ const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean): str
   return svg(
     W,
     66,
-    `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
+    `${rowCrab(W, 0, 14, costume, false, a.status === 'running', color)}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
 ${steps && stepsW > 30 ? `<text class="t" ${startText(W, 42, 49)} font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums">${xml(fitText(steps, 11, stepsW))}</text>` : ''}
@@ -768,17 +803,18 @@ ${statusMark(mx(W, W - 8), 16, 'planned', color)}
   )
 }
 
-const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>, isCostShown: boolean): string => {
+const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>, isCostShown: boolean, isRotating: boolean): string => {
+  const look = (a: AgentRun) => lookOf(a, isRotating)
   const icons = [
-    ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
-    ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
+    ...list.filter(a => a.status === 'running').map(a => ({ k: look(a).costume, c: look(a).color, s: 'running', dim: false })),
+    ...list.filter(a => a.status !== 'running').map(a => ({ k: look(a).costume, c: look(a).color, s: a.status, dim: false })),
     ...planned.map(p => ({ k: p.tier in TIER_COLOR ? p.tier : 'other', c: colorOf(p.tier), s: 'planned', dim: true })),
   ]
   const fit = Math.max(1, Math.floor((W - 150) / 36))
   const shown = icons.slice(0, fit)
   const more = icons.length - shown.length
   const body = shown
-    .map((ic, i) => rowCrab(W, i * 36, 0, ic.k, ic.dim, ic.s === 'running') + (ic.s === 'running' ? `<circle class="live" cx="${mx(W, i * 36 + 32)}" cy="4" r="3" fill="${ic.c}"/>` : ''))
+    .map((ic, i) => rowCrab(W, i * 36, 0, ic.k, ic.dim, ic.s === 'running', ic.c) + (ic.s === 'running' ? `<circle class="live" cx="${mx(W, i * 36 + 32)}" cy="4" r="3" fill="${ic.c}"/>` : ''))
     .join('')
   const x = shown.length * 36 + (more ? 4 : 0)
   return svg(
@@ -956,6 +992,15 @@ export const register: Register = (on, options) => {
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
+    // `costumes: "rotate"`: deal the next tier costume, in spawn order; Explore keeps its own.
+    let costume: string | undefined
+    if (options.costumes === 'rotate') {
+      if (e.subagentType === 'Explore') costume = 'explore'
+      else {
+        const dealt = await update($, rotation, r => ({ next: r.next + 1 }))
+        costume = TIERS[((dealt?.next ?? 1) - 1) % TIERS.length]
+      }
+    }
     await update($, agents, list => {
       const round = 1 + list.filter(a => norm(a.description) === norm(e.description) && e.description).length
       const run: AgentRun = {
@@ -972,10 +1017,12 @@ export const register: Register = (on, options) => {
         costUsd: 0,
         steps: 0,
         round,
+        costume,
       }
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
     await update($, now, () => at)
+    await unclear($, [started.agentId ?? e.tool_use_id])
     // A new subagent brings the crew band back after its ✕.
     await update($, crewBand, () => ({ isDismissed: false }))
     if (e.subagentType.startsWith('savvy-')) {
@@ -995,6 +1042,8 @@ export const register: Register = (on, options) => {
     if (!agentId || !usage) return result
 
     const model = usage.model || e.model
+    // A resumed agent (SendMessage) runs again: it is no longer one the panel was cleared of.
+    await unclear($, (await read($, agents)).filter(a => a.agentId === agentId).map(a => a.id))
     await update($, agents, list =>
       list.map((a): AgentRun =>
         a.agentId !== agentId
@@ -1057,19 +1106,35 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // `finished: "clear-on-close"`: the person's close mark or our own toggle ends what the panel showed.
+  // An unload is the engine dropping the pane, not the person finishing with it.
+  on('ui.close', async ($, e, next) => {
+    const closed = await next(e)
+    if (e.id === PANE && e.origin.kind !== 'unload' && options.finished === 'clear-on-close') {
+      const all = await read($, agents)
+      const present = new Set(all.map(a => a.id))
+      // Kept to the runs still listed, so the set stays within the agent list's own cap.
+      await update($, cleared, prev => ({
+        ids: [...new Set([...clearedIds(prev), ...all.filter(a => a.status !== 'running').map(a => a.id)])].filter(id => present.has(id)),
+      }))
+    }
+    return closed
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const s = tr()
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const list = await read($, agents)
+    const all = await read($, agents)
+    const list = visibleOf(all, options.finished === 'clear-on-close' ? clearedIds(await read($, cleared)) : [])
     const f = await read($, flow)
     const p: Panel = await read($, panel)
-    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+    const at = Math.max(await read($, now), ...all.map(a => a.startedAt), 0)
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
-    const planned = plannedOf(f, list)
-    const t = totals(list, at)
+    const planned = plannedOf(f, all)
+    const t = totals(all, at)
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
 
@@ -1091,6 +1156,7 @@ export const register: Register = (on, options) => {
     )
     const isEmpty = list.length === 0 && planned.length === 0
     const isCostShown = options.cost !== 'hide'
+    const isRotating = options.costumes === 'rotate'
     const summary = `${isCostShown ? `≈${fmtCost(t.cost)}, ` : ''}${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
@@ -1107,7 +1173,7 @@ export const register: Register = (on, options) => {
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1} alignItems={align}>
-            <Svg source={compactSvg(W, list, planned, t, isCostShown)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
+            <Svg source={compactSvg(W, list, planned, t, isCostShown, isRotating)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
             {toggleCompact}
           </Box>
         )
@@ -1128,12 +1194,12 @@ export const register: Register = (on, options) => {
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at, isCostShown)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
+              <Svg key={a.id} source={agentSvg(W, a, at, isCostShown, isRotating)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
             ))}
             {finished.length > 0 && toggleDone}
             {!p.isDoneCollapsed &&
               finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at, isCostShown)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
+                <Svg key={a.id} source={agentSvg(W, a, at, isCostShown, isRotating)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
               ))}
             {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
             {planned.map(pl => (
@@ -1149,7 +1215,7 @@ export const register: Register = (on, options) => {
     const barW = Math.max(6, Math.min(20, cols - 34))
     const row = (a: AgentRun) => {
       const tier = tierOf(a.type)
-      const color = colorOf(tier)
+      const color = lookOf(a, isRotating).color
       const ctx = ctxOf(a)
       const progress = progressOf(a)
       const model = runModel(a)
@@ -1194,7 +1260,7 @@ export const register: Register = (on, options) => {
         {p.isCompact ? (
           <Text wrap="truncate-end">
             {[...running, ...finished].map(a => (
-              <Text key={a.id} color={colorOf(tierOf(a.type))}>
+              <Text key={a.id} color={lookOf(a, isRotating).color}>
                 {STATUS_GLYPH[a.status]}{' '}
               </Text>
             ))}
@@ -1236,9 +1302,10 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
     if (e.props.hasSurvey || (f === null && options.band !== 'agents')) return next(e)
-    const list = await read($, agents)
+    const all = await read($, agents)
+    const list = visibleOf(all, options.finished === 'clear-on-close' ? clearedIds(await read($, cleared)) : [])
     // With `band: "agents"` and no flow, a compact band shows once any subagent has run, until its ✕.
-    const isCrewOnly = f === null && list.length > 0 && !(await read($, crewBand)).isDismissed
+    const isCrewOnly = f === null && all.length > 0 && !(await read($, crewBand)).isDismissed
     if (f === null && !isCrewOnly) return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
@@ -1247,7 +1314,7 @@ export const register: Register = (on, options) => {
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const crew = list.length + (f ? plannedOf(f, list).length : 0)
+    const crew = list.length + (f ? plannedOf(f, all).length : 0)
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
       <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />

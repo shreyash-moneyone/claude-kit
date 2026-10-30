@@ -34,6 +34,8 @@ export type AgentRun = {
   costUsd: number
   steps: number
   round: number
+  /** `costumes: "rotate"`: the costume dealt at spawn, kept for the run's life. */
+  costume?: string
   /** Self-reported by the worker through the `step` tool. */
   stepDone?: number
   stepTotal?: number
@@ -51,6 +53,16 @@ export type CrewBand = {
   isDismissed: boolean
 }
 
+/** `finished: "clear-on-close"`: ids of the runs that had finished when the panel last closed; they are not listed. */
+export type Cleared = {
+  ids: string[]
+}
+
+/** `costumes: "rotate"`: how many costumes have been dealt this session; the next one is this index. */
+export type Rotation = {
+  next: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'savvy-progress': {
@@ -58,6 +70,8 @@ declare module 'claude-code' {
       agents: AgentRun[]
       panel: Panel
       crewBand: CrewBand
+      cleared: Cleared
+      rotation: Rotation
       now: number
     }
   }

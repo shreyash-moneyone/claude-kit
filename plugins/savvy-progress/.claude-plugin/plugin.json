@@ -1,6 +1,6 @@
 {
   "name": "savvy-progress",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Progress bar above the prompt for /savvy-flow, plus an agents panel (/agents-info): running, finished and planned subagents with model, task progress, context, cost and time.",
   "author": {
     "name": "johnnyvizz",
@@ -48,6 +48,26 @@
       "options": [
         "flow",
         "agents"
+      ]
+    },
+    "finished": {
+      "type": "string",
+      "title": "Finished agents",
+      "description": "keep: finished agents stay in the panel; clear-on-close: closing the panel clears them from its list (totals still count them)",
+      "default": "keep",
+      "options": [
+        "keep",
+        "clear-on-close"
+      ]
+    },
+    "costumes": {
+      "type": "string",
+      "title": "Crab costumes",
+      "description": "savvy: costume and colour from the savvy-flow tier; rotate: every agent gets a tier costume in turn, coloured by its model family (Haiku, Sonnet, Opus, Fable)",
+      "default": "savvy",
+      "options": [
+        "savvy",
+        "rotate"
       ]
     }
   },
