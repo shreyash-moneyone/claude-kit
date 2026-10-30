@@ -30,4 +30,17 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 
 `costumes`: `savvy` (default) or `rotate`. With `savvy` a crab's costume and colour come from the savvy-flow tier (an `Explore` agent keeps the pirate). With `rotate` every agent is dealt one of the tier costumes in turn when it spawns (`Explore` still keeps the pirate) and keeps it, and its colour follows the model family instead of the tier: Haiku, Sonnet, Opus and Fable each have their own, an unknown model stays grey.
 
+`activity`: `off` (default) or `on`. With `on`, each agent row in the panel gets a small button (`▸ details` under the row on the desktop; on the terminal the row's title line itself) that opens the agent's brief (the first three lines of its prompt), its last 10 tool calls newest first with their age (`now`, `12s`, `3m`, `2h`), its current step note, and, once it has answered, the first three lines of its result. One agent is open at a time; closing the panel closes it. The band above the prompt and the collapsed panel never show details, and `cost: hide`, `finished`, `band` and `costumes` work as before. Hebrew draws the labels right to left and the commands and paths left to right. Ages count from the panel's own clock, which ticks only while an agent runs, so they hold still when none does. With `off` nothing is recorded and nothing changes.
+
+Everything an agent wrote that the panel shows (calls, brief, step note, result) is masked first and cut after, so a cut never leaves the head of a secret behind. The mask `•••` replaces these, case-insensitively:
+
+- `key=value`, `key: value` and `"key": "value"` for `password`, `passwd`, `pwd`, `secret`, `token`, `api_key`, `api-key`, `apikey`, `access_key`, `auth` and `key`, also as the end of a longer name (`PGPASSWORD=`, `GITHUB_TOKEN=`, `AWS_SECRET_ACCESS_KEY=`); the value is a quoted string (spaces included) or a run up to a space or quote
+- `Authorization: <the rest of the header>` and `Bearer <token>`
+- `--password <x>` (and `--password=<x>`), and `-p<x>` or `-p <x>` after `mysql`, `mysqldump` or `mariadb` only, so `mkdir -p dir` and `git log -p` stay
+- `://user:password@host` in a URL: the password goes, the user and host stay
+- keys that announce themselves: `sk-…`, `ghp_…` / `gho_…` / `ghu_…` / `ghs_…` / `ghr_…`, `github_pat_…`, `xoxa-` / `xoxb-` / `xoxp-` / `xoxr-` / `xoxs-` tokens, `AKIA…` access key ids
+- any other run of 32 or more base64 or hex characters that holds a letter and a digit (so a git hash goes too), unless it reads as a path (slashes with short parts between them)
+
+This is a best-effort filter for the usual ways credentials show up in a command line, a prompt or an answer, not a guarantee: a secret in none of those shapes (a bare password in prose, a short token with no label) is not caught, and only the first 4,000 characters of each text are looked at. Nothing is logged, written to disk or sent anywhere. One limit: the Agent call's `description` (the row's title) is written by the model, already drawn by the panel without this option, and is not masked.
+
 Install instructions are in the [repository README](../../README.md).
