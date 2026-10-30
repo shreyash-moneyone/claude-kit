@@ -46,12 +46,18 @@ export type Panel = {
   autoOpenedFor: string
 }
 
+/** The compact band shown without a flow (`band: "agents"`): hidden by its dismiss until the next subagent spawns. */
+export type CrewBand = {
+  isDismissed: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'savvy-progress': {
       flow: Flow | null
       agents: AgentRun[]
       panel: Panel
+      crewBand: CrewBand
       now: number
     }
   }

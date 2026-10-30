@@ -2,7 +2,7 @@
 
 A Claude Code mod: a progress bar above the prompt and a live panel of subagents. Made for the [savvy-flow](../savvy-flow) skill, and useful with any subagents.
 
-- **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts.
+- **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a button with the crew size that opens the panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts (with the `band` option, also for any subagent).
 - **Agents panel** (`/agents-info` toggles it; `/agents-info open` opens it or brings it forward without toggling): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
 
 ## Tools it adds
@@ -21,5 +21,9 @@ Cost is a rough estimate from token counts and a built-in per-model price table 
 ```
 
 `autoOpen`: `savvy` (default) or `any`. With `savvy` the panel opens by itself when a `savvy-*` worker starts or a plan is reported. With `any` it also opens, once per session, when any other subagent starts. `/agents-info` toggles it either way.
+
+`cost`: `show` (default) or `hide`. With `hide`, no dollar figure is drawn: the panel's summary, each agent's row and the collapsed panel keep tokens, context and time only. Handy on a subscription, where the estimate is noise.
+
+`band`: `flow` (default) or `agents`. With `flow` the band above the prompt appears only when a savvy-flow plan is reported or a `savvy-*` worker starts. With `agents` it also appears, compact (the word "Agents", the crew button that toggles the panel, and ✕), as soon as any subagent has run, with no flow needed. Its ✕ hides it until the next subagent starts. When a flow exists the band is the usual one.
 
 Install instructions are in the [repository README](../../README.md).

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import type { AgentRun, CrewBand, Flow, Panel, Phase, PlannedTask } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -10,6 +10,7 @@ const panel = atom({ plugin: 'savvy-progress', key: 'panel' } as const, {
   isDoneCollapsed: false,
   autoOpenedFor: '',
 })
+const crewBand = atom({ plugin: 'savvy-progress', key: 'crewBand' } as const, { isDismissed: false })
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
 const TOOL = 'mcp__savvy-progress__progress'
@@ -347,6 +348,25 @@ ${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, 
 </svg>`
 }
 
+// The band without a flow: the panel's name and the crab, in a drawing as wide as they are.
+const crewRowSvg = (isWorking: boolean): { source: string; width: number } => {
+  const text = tr().pane
+  const W = Math.ceil(16 + textWidth(text, 13) + 10 + CRAB_W)
+  const rtl = isRtl()
+  const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
+  const crabW = CRAB_BOX * 0.8
+  const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+<style>
+.t{fill:#1f1f1f}
+@media (prefers-color-scheme: dark){.t{fill:#ececec}}
+</style>
+<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${ACCENT}"/>
+<text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(text)}</text>
+${CRAB_CSS}${crab(rtl ? 1 : W - CRAB_W + 1, 0, 'other', false, isWorking, 0.8, rtl)}
+</svg>`
+  return { source, width: W }
+}
+
 const barText = (f: Flow, width: number): string => {
   const filled = Math.round(width * ratio(f))
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
@@ -484,6 +504,13 @@ const totals = (list: AgentRun[], at: number) => {
   const end = Math.max(...list.map(a => a.endedAt ?? Math.max(at, a.startedAt)))
   return { cost, tokens, time: list.length ? end - start : 0 }
 }
+
+// The figures a summary line shows: the cost, unless hidden, then tokens and time.
+const summaryParts = (t: ReturnType<typeof totals>, isCostShown: boolean): string[] => [
+  ...(isCostShown ? [`≈${fmtCost(t.cost)}`] : []),
+  fmtTokens(t.tokens),
+  fmtTime(t.time),
+]
 
 // --- desktop drawings: each row is one SVG, as the band above the prompt is.
 
@@ -665,10 +692,11 @@ const svg = (W: number, H: number, body: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
 
 // The pane's own title already says "Agents": the header names the flow, if any.
-const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): string => {
+const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>, isCostShown: boolean): string => {
   const s = tr()
   const gap = 6
-  const tw = (W - gap * 2) / 3
+  const tiles = isCostShown ? 3 : 2
+  const tw = (W - gap * (tiles - 1)) / tiles
   const top = title ? 28 : 0
   const tile = (i: number, k: string, v: string) =>
     `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="40" rx="8"/>
@@ -678,7 +706,7 @@ const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): stri
     W,
     headerHeight(title),
     `${title ? `<text class="t" ${startText(W, 0, 15)} font-family="${FONT}" font-size="14" font-weight="600">${xml(fitText(title, 14, W))}</text>` : ''}
-${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.tokens))}${tile(2, s.time, fmtTime(t.time))}`,
+${isCostShown ? tile(0, s.cost, '≈' + fmtCost(t.cost)) : ''}${tile(tiles - 2, s.tokens, fmtTokens(t.tokens))}${tile(tiles - 1, s.time, fmtTime(t.time))}`,
   )
 }
 
@@ -693,7 +721,7 @@ const progressOf = (a: AgentRun): number | null => {
 
 const ctxOf = (a: AgentRun): number => (a.contextMax ? Math.min(100, Math.round((a.contextTokens / a.contextMax) * 100)) : 0)
 
-const agentSvg = (W: number, a: AgentRun, at: number): string => {
+const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean): string => {
   const s = tr()
   const tier = tierOf(a.type)
   const color = colorOf(tier)
@@ -704,7 +732,7 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   if (a.status === 'failed') meta.push(s.failed)
   const barW = textW
   const progress = progressOf(a)
-  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ≈${fmtCost(a.costUsd)}  ${fmtTime(elapsed(a, at))}`
+  const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ${isCostShown ? `≈${fmtCost(a.costUsd)}  ` : ''}${fmtTime(elapsed(a, at))}`
   const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
@@ -740,7 +768,7 @@ ${statusMark(mx(W, W - 8), 16, 'planned', color)}
   )
 }
 
-const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>): string => {
+const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnType<typeof totals>, isCostShown: boolean): string => {
   const icons = [
     ...list.filter(a => a.status === 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: 'running', dim: false })),
     ...list.filter(a => a.status !== 'running').map(a => ({ k: costumeOf(a.type), c: colorOf(tierOf(a.type)), s: a.status, dim: false })),
@@ -757,7 +785,7 @@ const compactSvg = (W: number, list: AgentRun[], planned: Planned[], t: ReturnTy
     W,
     32,
     `${body}${more ? `<text class="s" ${startText(W, x, 21, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}
-<text class="s" ${endText(W, W, 21)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">≈${fmtCost(t.cost)} · ${fmtTokens(t.tokens)} · ${fmtTime(t.time)}</text>`,
+<text class="s" ${endText(W, W, 21)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${summaryParts(t, isCostShown).join(' · ')}</text>`,
   )
 }
 
@@ -948,6 +976,8 @@ export const register: Register = (on, options) => {
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
     await update($, now, () => at)
+    // A new subagent brings the crew band back after its ✕.
+    await update($, crewBand, () => ({ isDismissed: false }))
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
@@ -1060,7 +1090,8 @@ export const register: Register = (on, options) => {
       />
     )
     const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+    const isCostShown = options.cost !== 'hide'
+    const summary = `${isCostShown ? `≈${fmtCost(t.cost)}, ` : ''}${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
@@ -1076,7 +1107,7 @@ export const register: Register = (on, options) => {
       if (p.isCompact) {
         return (
           <Box flexDirection="column" gap={1} alignItems={align}>
-            <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
+            <Svg source={compactSvg(W, list, planned, t, isCostShown)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
             {toggleCompact}
           </Box>
         )
@@ -1092,17 +1123,17 @@ export const register: Register = (on, options) => {
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
+            <Svg source={headerSvg(W, title, t, isCostShown)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
             {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
+              <Svg key={a.id} source={agentSvg(W, a, at, isCostShown)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
             ))}
             {finished.length > 0 && toggleDone}
             {!p.isDoneCollapsed &&
               finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
+                <Svg key={a.id} source={agentSvg(W, a, at, isCostShown)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
               ))}
             {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
             {planned.map(pl => (
@@ -1142,7 +1173,7 @@ export const register: Register = (on, options) => {
             {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
             <Text dimColor>
               {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} {isCostShown ? `≈${fmtCost(a.costUsd)} ` : ''}{fmtTime(elapsed(a, at))}
             </Text>
           </Text>
         </Box>
@@ -1158,7 +1189,7 @@ export const register: Register = (on, options) => {
           {toggleCompact}
         </Box>
         <Text dimColor>
-          ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
+          {isCostShown ? `≈${fmtCost(t.cost)} · ` : ''}{fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
         </Text>
         {p.isCompact ? (
           <Text wrap="truncate-end">
@@ -1204,7 +1235,11 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey || (f === null && options.band !== 'agents')) return next(e)
+    const list = await read($, agents)
+    // With `band: "agents"` and no flow, a compact band shows once any subagent has run, until its ✕.
+    const isCrewOnly = f === null && list.length > 0 && !(await read($, crewBand)).isDismissed
+    if (f === null && !isCrewOnly) return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
@@ -1212,25 +1247,58 @@ export const register: Register = (on, options) => {
 
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const list = await read($, agents)
-    const crew = list.length + plannedOf(f, list).length
+    const crew = list.length + (f ? plannedOf(f, list).length : 0)
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (
       <Button key="savvy-agents" label={`×${crew}`} plain onPress={() => void togglePane($)} />
     )
-    const percent = `${Math.round(ratio(f) * 100)}%`
     const dismiss = (
       <Button
         key="savvy-dismiss"
         label="✕"
         plain
         role="dismiss"
-        onPress={() => update($, flow, () => null)}
+        onPress={async () => {
+          await update($, crewBand, () => ({ isDismissed: true }))
+          await update($, flow, () => null)
+        }}
       />
     )
+    const isSvg = e.surface !== 'terminal' && 'Svg' in ui
+
+    if (!f) {
+      // No flow: the panel's name, the crew button and the dismiss.
+      if (isSvg) {
+        const { Svg } = ui
+        const row = crewRowSvg(isWorking)
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
+              <Svg source={row.source} alt={`${tr().pane}: ${crew}`} width={row.width} height={H} />
+              {crewButton}
+              {dismiss}
+            </Box>
+            {below}
+          </Box>
+        )
+      }
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={2}>
+            <Text color={ACCENT}>● </Text>
+            <Text bold>{tr().pane}</Text>
+            <Text color={CLAY}>▣</Text>
+            {crewButton}
+            {dismiss}
+          </Box>
+          {below}
+        </Box>
+      )
+    }
+    const percent = `${Math.round(ratio(f) * 100)}%`
 
     // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
-    if (e.surface !== 'terminal' && 'Svg' in ui) {
+    if (isSvg) {
       const { Svg } = ui
       // About 8 CSS px per reported column; the rest is the count, the dismiss
       // and their gaps. No floor above the slot: a row wider than it would wrap.
