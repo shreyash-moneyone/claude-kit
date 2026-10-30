@@ -42,14 +42,17 @@ const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<
     return { model: MODEL, agentId: e.tool_use_id } as never
   })
   on('turn.complete', () => ({ text: '' }) as never)
+  // A test holds a model step open by setting `gate.hold`; the step answers once it resolves.
+  const gate: { hold?: Promise<void> } = {}
   on('turn.step', async function* () {
+    await gate.hold
     return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: MODEL, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
   })
   on('tool.call', async ($$, e) => {
     seen.push(e as never)
     return ((await tap?.($$ as never, e as never)) ?? { result: 'ran' }) as never
   })
-  return { clock, seen, prompts, st, pane }
+  return { clock, seen, prompts, st, pane, gate }
 }
 
 const spawn = async ($: Engine, id: string, o: { prompt?: string; type?: string; desc?: string } = {}) => {
@@ -356,6 +359,12 @@ test('activity on: a resumed worker drops its old result, keeps its brief and hi
 
 const MASKS: [name: string, input: string, masked: string, secret: string][] = [
   ['mysql -p<x>', 'mysql -u root -pS3cretPw db', 'mysql -u root -p••• db', 'S3cretPw'],
+  ['mysql -p<x> with the command in capitals', 'MYSQL -u root -pS3cretPw db', 'MYSQL -u root -p••• db', 'S3cretPw'],
+  ['mysqldump -p <x> in mixed case', 'MySqlDump -p S3cretPw db', 'MySqlDump -p ••• db', 'S3cretPw'],
+  ['mariadb -p<x> in capitals', 'MARIADB -pS3cretPw', 'MARIADB -p•••', 'S3cretPw'],
+  ['an escaped double quote in a quoted value', 'login password="abc\\"defghi" tail', 'login password=••• tail', 'abc\\"defghi'],
+  ['an escaped single quote in a quoted value', "login token='abc\\'defghi' tail", 'login token=••• tail', "abc\\'defghi"],
+  ['an escaped backslash before the closing quote', 'login secret="abcdefghi\\\\" tail', 'login secret=••• tail', 'abcdefghi'],
   ['mysql -p <x>', 'mysql -p S3cretPw', 'mysql -p •••', 'S3cretPw'],
   ['URL userinfo', 'psql postgres://u:S3cretPw@h/db', 'psql postgres://u:•••@h/db', 'S3cretPw'],
   ['Authorization header', "curl -H 'Authorization: Bearer abc123xyz'", "curl -H 'Authorization: •••'", 'abc123xyz'],
@@ -466,6 +475,15 @@ test('activity on: a quoted secret that spans lines is masked before the lines a
   const w = world(on)
   await spawn($, 'a1', { prompt: 'a\npassword="line1secret\nline2secret"\nz\nw' })
   expect((run(w, 'a1'))?.brief).toBe('a\npassword=•••\nz')
+})
+
+test('activity on: an adversarial 4000-character quoted value is masked quickly', ON, async ($, on) => {
+  const w = world(on)
+  await spawn($, 'a1')
+  const started = Date.now()
+  for (const evil of [`password="${'\\"'.repeat(1300)}`, `token='${'\\\\'.repeat(2000)}`, `key=${'"'.repeat(4000)}`]) await call($, 'a1', 'Bash', { command: evil })
+  expect(Date.now() - started).toBeLessThan(2000)
+  expect(texts(w, 'a1').every(t => t.length <= 80)).toBe(true)
 })
 
 test('activity on: a step note is clipped to 80 characters, masked first', ON, async ($, on) => {
@@ -808,6 +826,27 @@ for (const surface of SURFACES) {
     expect(await ui.find({ key: 'savvy-agents' })).toBeDefined()
     expect((await ui.findAll({ type: 'Button' })).filter(b => String(b.props.key).startsWith('act-'))).toEqual([])
     expect(await everything(ui as never)).not.toContain('Read register.tsx')
+  })
+
+  // The old answer is not the new turn's: it leaves the panel when the resumed step starts, not when it ends.
+  test(`${surface}: a resumed run's old result is not drawn while its model step is still pending`, ON, async ($, on) => {
+    const w = world(on)
+    await worker($)
+    await finish($, 'a1', 'answer', 'old answer')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect((await detail(ui, 'a1'))?.slice(-2)).toEqual(['Result', '  old answer'])
+
+    let release = () => {}
+    w.gate.hold = new Promise<void>(r => (release = r))
+    const stepping = resume($, 'a1')
+    await w.clock.settle()
+    expect(await everything(ui)).not.toContain('old answer')
+    expect(run(w, 'a1')?.result).toBeUndefined()
+    release()
+    await stepping
+    expect(run(w, 'a1')?.status).toBe('running')
+    expect(await everything(ui)).not.toContain('old answer')
   })
 
   test(`${surface}: finishing an open run keeps it open and shows its result`, ON, async ($, on) => {

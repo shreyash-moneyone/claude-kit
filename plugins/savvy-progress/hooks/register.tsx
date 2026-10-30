@@ -837,9 +837,11 @@ const MAX_CALLS = 10
 // Text is looked at up to here: a prompt or a command can be as long as the model likes.
 const MAX_RAW = 4000
 
-// A value after `key=`: a quoted string (spaces and all, an unclosed one runs to the end) or a run up to a space or quote.
-const VALUE = `"[^"]*"?|'[^']*'?|[^\\s'"]+`
+// A value after `key=`: a quoted string (spaces and escaped quotes and all, an unclosed one runs to the end) or a run up to a space or quote.
+const VALUE = `"(?:[^"\\\\]|\\\\.)*"?|'(?:[^'\\\\]|\\\\.)*'?|[^\\s'"]+`
 const SECRET_KEY = 'password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth|key'
+
+const anyCase = (word: string): string => [...word].map(c => `[${c}${c.toUpperCase()}]`).join('')
 
 // What is masked, in order: each rule keeps the words around the secret and replaces the secret.
 const MASKS: [RegExp, string][] = [
@@ -849,7 +851,8 @@ const MASKS: [RegExp, string][] = [
   [/(\bAuthorization["']?[ \t]*[:=][ \t]*)(?:"[^"]*"|'[^']*'|[^\r\n'"]*)/gi, `$1${MASK}`],
   [/\b(Bearer[ \t]+)[^\s'"]+/gi, `$1${MASK}`],
   // mysql -pS3cret and mysql -p S3cret; only after the mysql family, so `mkdir -p dir` stays.
-  [/\b((?:mysql|mysqldump|mariadb)\b[^\n|;&]*?[ \t]-p[ \t]*)(?!-)\S+/g, `$1${MASK}`],
+  // The command's name is any case; `-p` is not (`-P` is the port).
+  [new RegExp(`\\b((?:${['mysql', 'mysqldump', 'mariadb'].map(anyCase).join('|')})\\b[^\\n|;&]*?[ \\t]-p[ \\t]*)(?!-)\\S+`, 'g'), `$1${MASK}`],
   [/(--passw(?:or)?d[ \t]+)(?![-\s])\S+/gi, `$1${MASK}`],
   // key=value, key: value, "key": "value"; a longer name that ends in one (PGPASSWORD, GITHUB_TOKEN) counts.
   [new RegExp(`\\b([\\w.-]*?(?:${SECRET_KEY}))(["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gi'), `$1$2${MASK}`],
@@ -1260,6 +1263,10 @@ export const register: Register = (on, options) => {
 
   // Each model request of a subagent: live context, tokens and cost.
   on('turn.step', async function* ($, e, next) {
+    // A resumed run's old answer is not this turn's: it goes as the step starts, not when it ends.
+    if (options.activity === 'on' && e.agentId && (await read($, agents)).some(a => a.agentId === e.agentId && a.result !== undefined)) {
+      await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, result: undefined } : a)))
+    }
     const result = yield* next(e)
     const agentId = e.agentId
     const usage = result.usage
