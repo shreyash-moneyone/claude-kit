@@ -799,6 +799,17 @@ for (const surface of SURFACES) {
     }
   })
 
+  test(`${surface}: the flow band (band "flow") never shows details or their buttons either`, ON, async ($, on) => {
+    world(on)
+    await worker($)
+    await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 2, phase: 'delegate' } as never)
+    await (await mountPane($, surface)).press({ key: 'act-a1' })
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+    expect(await ui.find({ key: 'savvy-agents' })).toBeDefined()
+    expect((await ui.findAll({ type: 'Button' })).filter(b => String(b.props.key).startsWith('act-'))).toEqual([])
+    expect(await everything(ui as never)).not.toContain('Read register.tsx')
+  })
+
   test(`${surface}: finishing an open run keeps it open and shows its result`, ON, async ($, on) => {
     world(on)
     await worker($, 'a1')
