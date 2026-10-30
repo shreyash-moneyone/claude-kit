@@ -14,7 +14,7 @@ type World = ReturnType<typeof world>
 type Run = AgentRun
 
 // The world beneath the plugin: a mocked clock, and a bottom `tool.call` that records what reaches it.
-const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<void>) => {
+const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<void | Record<string, unknown>>) => {
   const clock = mock.clock(on)
   const seen: Record<string, unknown>[] = []
   const prompts: string[] = []
@@ -28,7 +28,15 @@ const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<
     }
     return set
   })
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  // The engine's pane list: `/agents-info` and the band's button open and close the pane through it.
+  const pane = { isOpen: false, closed: 0 }
+  on('ui.open', () => ((pane.isOpen = true), { value: { isPlaced: true } }))
+  on('ui.close', () => ((pane.isOpen = false), pane.closed++, { value: undefined }) as never)
+  on('ui.panes', () => ({ value: pane.isOpen ? [{ id: 'savvy-agents' }] : [] }) as never)
+  on('ui.render', { component: 'AbovePrompt' }, ($$, e) => {
+    const { Box } = $$.ui.resolve(e)
+    return <Box key="bottom" /> as never
+  })
   on('agent.spawn', (_$, e) => {
     prompts.push(e.prompt)
     return { model: MODEL, agentId: e.tool_use_id } as never
@@ -39,14 +47,13 @@ const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<
   })
   on('tool.call', async ($$, e) => {
     seen.push(e as never)
-    await tap?.($$ as never, e as never)
-    return { result: 'ran' } as never
+    return ((await tap?.($$ as never, e as never)) ?? { result: 'ran' }) as never
   })
-  return { clock, seen, prompts, st }
+  return { clock, seen, prompts, st, pane }
 }
 
 const spawn = async ($: Engine, id: string, o: { prompt?: string; type?: string; desc?: string } = {}) => {
-  await $.agent.spawn({ tool_use_id: id, prompt: o.prompt ?? 'p', description: o.desc ?? `Work ${id}`, subagentType: o.type ?? 'general-purpose', provider: 'engine', parentModel: MODEL, background: false, fork: false } as never)
+  await $.agent.spawn({ tool_use_id: id, prompt: o.prompt ?? ' ', description: o.desc ?? `Work ${id}`, subagentType: o.type ?? 'general-purpose', provider: 'engine', parentModel: MODEL, background: false, fork: false } as never)
 }
 
 const finish = async ($: Engine, id: string, reason = 'answer', answer = 'ok') => {
@@ -176,6 +183,25 @@ test('activity on: an ordinary tool\'s bottom receives the unchanged event exact
   expect(answer).toMatchObject({ result: 'ran' })
   expect(w.seen).toHaveLength(1)
   expect(w.seen[0]).toMatchObject({ tool: 'Bash', command: 'ls -la', description: 'list', agentId: 'a1' })
+})
+
+// What a refusal from beneath the recorder does to the call is the same with the option on and off.
+const refused = async ($: Engine, on: On) => {
+  world(on, async (_$, e) => (e.command === 'rm -rf /' ? { deny: 'not that' } : undefined))
+  await spawn($, 'a1')
+  try {
+    return await call($, 'a1', 'Bash', { command: 'rm -rf /' })
+  } catch (err) {
+    return `threw: ${String(err)}`
+  }
+}
+
+test('activity off: a refusal from beneath passes through (the reference outcome)', async ($, on) => {
+  expect(await refused($, on)).toEqual({ deny: 'not that' })
+})
+
+test('activity on: a refusal from beneath passes through exactly as with the option off', ON, async ($, on) => {
+  expect(await refused($, on)).toEqual({ deny: 'not that' })
 })
 
 test('activity on: a worker\'s nested savvy Agent call still counts in flow.running while it runs', ON, async ($, on) => {
@@ -449,4 +475,460 @@ test('activity on: a step note is clipped to 80 characters, masked first', ON, a
   expect((run(w, 'a1'))?.stepNote).toBe(`${'n'.repeat(79)}…`)
   await call($, 'a1', STEP, { done: 1, total: 1, note: '   ' })
   expect((run(w, 'a1'))?.stepNote).toBeUndefined()
+})
+
+// ---------------------------------------------------------------------------
+// The panel: a plain button per agent row opens its details.
+
+const PANE = 'savvy-agents'
+const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
+const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const SURFACES = ['terminal', 'desktop'] as const
+type Surface = (typeof SURFACES)[number]
+
+type Node = { type: string; props: Record<string, unknown>; children?: (Node | string)[] }
+const textOf = (n: Node | string): string => (typeof n === 'string' ? n : (n.children ?? []).map(textOf).join(''))
+const walk = (n: Node | string, out: Node[] = []): Node[] => {
+  if (typeof n !== 'string') {
+    out.push(n)
+    for (const c of n.children ?? []) walk(c, out)
+  }
+  return out
+}
+
+const mountPane = ($: Engine, surface: Surface, props: Record<string, unknown> = pane) => $.ui.mount({ plugin: PLUGIN, surface, component: 'Pane', requestId: PANE, props } as never)
+type Pane = Awaited<ReturnType<typeof mountPane>>
+
+// The lines of a run's open details, or undefined while it is closed.
+const detailNode = async (ui: Pane, id: string) => (await ui.find({ key: `det-${id}` })) as unknown as Node | undefined
+const detail = async (ui: Pane, id: string) => (await detailNode(ui, id))?.children?.map(textOf)
+
+// Every string the drawing holds: texts, button labels, the Svg's source and alt.
+const everything = async (ui: Pane): Promise<string> => {
+  const parts: string[] = []
+  for (const n of walk((await ui.drawn()) as unknown as Node)) {
+    for (const c of n.children ?? []) if (typeof c === 'string') parts.push(c)
+    for (const k of ['label', 'source', 'alt', 'text']) if (typeof n.props[k] === 'string') parts.push(n.props[k] as string)
+  }
+  return parts.join('\n')
+}
+
+const actKeys = async (ui: Pane) => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.key)).filter(k => k.startsWith('act-'))
+const actLabel = async (ui: Pane, id: string) => (await ui.find({ key: `act-${id}` }))?.props.label as string | undefined
+// What the button reads: the desktop's own control, the terminal's description line.
+const label = (surface: Surface, isOpen: boolean, desc: string) => `${isOpen ? '▾' : '▸'} ${surface === 'desktop' ? 'details' : desc}`
+
+// Agents the panel stored before this option: no brief, activity or result, and a panel with no `expandedId`.
+const OLD_RUN = { id: 'a1', agentId: 'a1', type: 'general-purpose', description: 'Work a1', model: MODEL, status: 'running', startedAt: 0, contextTokens: 0, contextMax: 1e6, tokens: 0, costUsd: 0, steps: 0, round: 1 }
+const seed = (on: On, list: unknown[]) => on('state.get', { plugin: PLUGIN, key: 'agents' } as never, (() => ({ value: { value: list, version: 0 } })) as never)
+
+// One worker with a brief, a call, a step note; `a1` at clock 0.
+const worker = async ($: Engine, id = 'a1', prompt = 'Task one') => {
+  await spawn($, id, { prompt })
+  await call($, id, 'Read', { file_path: '/x/y/register.tsx' })
+  await call($, id, STEP, { done: 1, total: 3, note: 'reading' })
+}
+
+for (const surface of SURFACES) {
+  test(`${surface}: activity off draws no details button, even over stored activity`, async ($, on) => {
+    world(on)
+    seed(on, [{ ...OLD_RUN, brief: 'Task one', activity: [{ at: 0, text: 'Read register.tsx' }], result: 'done' }])
+    const ui = await mountPane($, surface)
+    expect(await actKeys(ui)).toEqual([])
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+  })
+
+  test(`${surface}: activity off leaves a step note as stored`, async ($, on) => {
+    world(on)
+    seed(on, [{ ...OLD_RUN, stepDone: 1, stepTotal: 3, stepNote: 'password=hunter2xy' }])
+    expect(await everything(await mountPane($, surface))).toContain('hunter2xy')
+  })
+
+  test(`${surface}: pressing details opens the block, pressing again closes it`, ON, async ($, on) => {
+    const w = world(on)
+    await worker($)
+    const ui = await mountPane($, surface)
+    expect(await actLabel(ui, 'a1')).toBe(label(surface, false, 'Work a1'))
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+
+    await ui.press({ key: 'act-a1' })
+    expect(await actLabel(ui, 'a1')).toBe(label(surface, true, 'Work a1'))
+    expect(await detail(ui, 'a1')).toEqual(['Brief', '  Task one', 'Activity', '  now  Read register.tsx', 'Step', '  reading'])
+    expect(w.st.value.panel).toMatchObject({ expandedId: 'a1' })
+
+    await ui.press({ key: 'act-a1' })
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+    expect(w.st.value.panel).toMatchObject({ expandedId: '' })
+  })
+
+  test(`${surface}: one run is open at a time`, ON, async ($, on) => {
+    world(on)
+    await worker($, 'a1', 'Task one')
+    await worker($, 'a2', 'Task two')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect((await detail(ui, 'a1'))?.[1]).toBe('  Task one')
+    await ui.press({ key: 'act-a2' })
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+    expect((await detail(ui, 'a2'))?.[1]).toBe('  Task two')
+    expect(await actLabel(ui, 'a1')).toBe(label(surface, false, 'Work a1'))
+  })
+
+  test(`${surface}: activity shows newest first, with its age`, ON, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1')
+    await call($, 'a1', 'Bash', { command: 'first' })
+    await w.clock.advance(5000)
+    await call($, 'a1', 'Bash', { command: 'second' })
+    await w.clock.advance(4000)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  4s  Bash: second', '  9s  Bash: first'])
+  })
+
+  for (const [ms, age] of [[0, 'now'], [999, 'now'], [1000, '1s'], [59_000, '59s'], [60_000, '1m'], [3_599_000, '59m'], [3_600_000, '1h'], [7_300_000, '2h']] as const) {
+    test(`${surface}: an entry ${ms} ms old reads "${age}"`, ON, async ($, on) => {
+      const w = world(on)
+      await spawn($, 'a1')
+      await call($, 'a1', 'Bash', { command: 'x' })
+      await w.clock.advance(ms)
+      await $.command.run({ command: 'agents-info', args: 'open' } as never)
+      const ui = await mountPane($, surface)
+      await ui.press({ key: 'act-a1' })
+      expect(await detail(ui, 'a1')).toEqual(['Activity', `  ${age}  Bash: x`])
+    })
+  }
+
+  test(`${surface}: a finished run shows its result, a running one does not`, ON, async ($, on) => {
+    world(on)
+    await worker($)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).not.toContain('Result')
+    await finish($, 'a1', 'answer', 'all done\nsecond line')
+    // The same drawing, not remounted: still open, now with the result.
+    expect(await detail(ui, 'a1')).toEqual(['Brief', '  Task one', 'Activity', '  now  Read register.tsx', 'Step', '  reading', 'Result', '  all done', '  second line'])
+    expect(await actLabel(ui, 'a1')).toBe(label(surface, true, 'Work a1'))
+  })
+
+  test(`${surface}: the open block follows a worker live: new calls, a new step note, no remount`, ON, async ($, on) => {
+    world(on)
+    await spawn($, 'a1')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).toEqual([])
+    await call($, 'a1', 'Bash', { command: 'ls' })
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  now  Bash: ls'])
+    await call($, 'a1', STEP, { done: 1, total: 2, note: 'listing' })
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  now  Bash: ls', 'Step', '  listing'])
+  })
+
+  test(`${surface}: stored runs from before the option open to an empty block without a throw`, ON, async ($, on) => {
+    world(on)
+    seed(on, [OLD_RUN])
+    const ui = await mountPane($, surface)
+    expect(await actKeys(ui)).toEqual(['act-a1'])
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).toEqual([])
+  })
+
+  test(`${surface}: a stored step note is masked when drawn, in the row and in the block`, ON, async ($, on) => {
+    world(on)
+    seed(on, [{ ...OLD_RUN, stepDone: 1, stepTotal: 3, stepNote: `password=hunter2xy ${'n'.repeat(100)}` }])
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    const all = await everything(ui)
+    expect(leaks(all, 'hunter2xy')).toBe(false)
+    expect(all).toContain('password=•••')
+    expect((await detail(ui, 'a1'))?.[1]).toBe(`  password=••• ${'n'.repeat(66)}…`)
+  })
+
+  test(`${surface}: a secret through every channel appears nowhere in the open panel`, ON, async ($, on) => {
+    world(on)
+    const secret = 'hunter2xy'
+    await spawn($, 'a1', { prompt: `use password=${secret}` })
+    await call($, 'a1', 'Bash', { command: `mysql -u root -p${secret} db` })
+    await call($, 'a1', STEP, { done: 0, total: 1, note: `token: ${secret}` })
+    await finish($, 'a1', 'answer', `done with PGPASSWORD=${secret}`)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    const all = await everything(ui)
+    expect(all).toContain('•••')
+    expect(all).toContain('mysql -u root -p••• db')
+    expect(leaks(all, secret)).toBe(false)
+  })
+}
+
+// The session's start: registers the tools and starts the 1-second clock that ages a running row.
+const boot = async ($: Engine, on: On) => {
+  on('session.start', () => ({ cwd: '/x' }) as never)
+  on('tool.register', () => ({ value: undefined }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  await ($.session as unknown as { start: (e: unknown) => Promise<unknown> }).start({ source: 'startup', cwd: '/x' })
+}
+
+const EN_ON = { options: { activity: 'on', language: 'en' } } as const
+const HE_ON = { options: { activity: 'on', language: 'he' } } as const
+const RU_ON = { options: { activity: 'on', language: 'ru' } } as const
+
+for (const surface of SURFACES) {
+  test(`${surface}: the ages move with the pane's own clock while an agent runs, in the mounted drawing`, EN_ON, async ($, on) => {
+    const w = world(on)
+    await boot($, on)
+    await spawn($, 'a1')
+    await call($, 'a1', 'Bash', { command: 'ls' })
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  now  Bash: ls'])
+    await w.clock.advance(12_000)
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  12s  Bash: ls'])
+    await w.clock.advance(48_000)
+    expect(await detail(ui, 'a1')).toEqual(['Activity', '  1m  Bash: ls'])
+  })
+
+  test(`${surface}: every detail line is one row, cut at the edge`, ON, async ($, on) => {
+    world(on)
+    await worker($)
+    await finish($, 'a1', 'answer', 'done')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    const lines = ((await detailNode(ui, 'a1'))?.children ?? []) as Node[]
+    expect(lines).toHaveLength(8)
+    for (const l of lines) expect(l.props).toMatchObject({ dimColor: true, wrap: 'truncate-end' })
+  })
+
+  // -- right to left and localized
+  test(`${surface}: Hebrew labels read right to left, machine lines left to right, the block flush right`, HE_ON, async ($, on) => {
+    world(on)
+    await boot($, on)
+    await worker($)
+    const ui = await mountPane($, surface)
+    expect(await actLabel(ui, 'a1')).toBe(`◂ ${surface === 'desktop' ? 'פרטים' : 'Work a1'}`)
+    await ui.press({ key: 'act-a1' })
+    expect(await actLabel(ui, 'a1')).toBe(`▾ ${surface === 'desktop' ? 'פרטים' : 'Work a1'}`)
+    const box = await detailNode(ui, 'a1')
+    expect(box?.props.alignItems).toBe('flex-end')
+    expect((box?.children ?? []).map(textOf)).toEqual(['משימה', '  Task one', 'פעילות', '  עכשיו  Read register.tsx', 'שלב', '  reading'])
+    expect(((box?.children ?? []) as Node[]).map(n => n.props.dir)).toEqual(['rtl', 'ltr', 'rtl', 'ltr', 'rtl', 'ltr'])
+  })
+
+  test(`${surface}: Hebrew ages read in Hebrew units`, HE_ON, async ($, on) => {
+    const w = world(on)
+    await boot($, on)
+    await spawn($, 'a1')
+    await call($, 'a1', 'Bash', { command: 'x' })
+    await w.clock.advance(7_300_000)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    expect((await detail(ui, 'a1'))?.[1]).toBe('  2שע׳  Bash: x')
+  })
+
+  test(`${surface}: Russian labels and units`, RU_ON, async ($, on) => {
+    const w = world(on)
+    await boot($, on)
+    await worker($)
+    await finish($, 'a1', 'answer', 'ok')
+    await w.clock.advance(180_000)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    const ui = await mountPane($, surface)
+    expect(await actLabel(ui, 'a1')).toBe(`▸ ${surface === 'desktop' ? 'подробности' : 'Work a1'}`)
+    await ui.press({ key: 'act-a1' })
+    expect(await detail(ui, 'a1')).toEqual(['Задание', '  Task one', 'Действия', '  3м  Read register.tsx', 'Шаг', '  reading', 'Результат', '  ok'])
+    const box = await detailNode(ui, 'a1')
+    expect(box?.props.alignItems).toBeUndefined()
+    expect(((box?.children ?? []) as Node[]).every(n => n.props.dir === undefined)).toBe(true)
+  })
+
+  // -- the other options
+  test(`${surface}: cost "hide" leaves every generated cost out of the open panel`, { options: { activity: 'on', cost: 'hide' } }, async ($, on) => {
+    world(on)
+    await worker($)
+    const usage = { model: MODEL, input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: 'a1', reason: 'answer', answer: 'done', usage })
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    const all = await everything(ui)
+    expect(all).toContain('Result')
+    expect(all).not.toMatch(/≈|\$/)
+  })
+
+  test(`${surface}: finished rows hidden by the done section draw no button and no block, and come back with it`, ON, async ($, on) => {
+    world(on)
+    await worker($, 'a1')
+    await spawn($, 'a2')
+    await finish($, 'a1')
+    const ui = await mountPane($, surface)
+    expect(await actKeys(ui)).toEqual(expect.arrayContaining(['act-a1', 'act-a2']))
+    await ui.press({ key: 'act-a1' })
+    expect(await detailNode(ui, 'a1')).toBeDefined()
+    await ui.press({ key: 'done' })
+    expect(await actKeys(ui)).toEqual(['act-a2'])
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+    await ui.press({ key: 'done' })
+    expect((await detail(ui, 'a1'))?.[0]).toBe('Brief')
+  })
+
+  test(`${surface}: the compact panel draws no button and no block, and the block returns when it is expanded again`, ON, async ($, on) => {
+    world(on)
+    await worker($)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    await ui.press({ key: 'compact' })
+    expect(await actKeys(ui)).toEqual([])
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+    await ui.press({ key: 'compact' })
+    expect((await detail(ui, 'a1'))?.[0]).toBe('Brief')
+  })
+
+  test(`${surface}: the band above the prompt never shows details or their buttons`, { options: { activity: 'on', band: 'agents' } }, async ($, on) => {
+    world(on)
+    await worker($)
+    await $.tool.call({ tool: PROGRESS, title: 'Ship it', total: 2, phase: 'delegate' } as never)
+    const pane1 = await mountPane($, surface)
+    await pane1.press({ key: 'act-a1' })
+    for (const withFlow of [true, false]) {
+      if (!withFlow) await $.tool.call({ tool: PROGRESS, finished: true } as never)
+      const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+      expect(await ui.find({ key: 'savvy-agents' })).toBeDefined()
+      expect((await ui.findAll({ type: 'Button' })).filter(b => String(b.props.key).startsWith('act-'))).toEqual([])
+      const all = await everything(ui as never)
+      expect(all).not.toContain('Task one')
+      expect(all).not.toContain('Read register.tsx')
+    }
+  })
+
+  test(`${surface}: finishing an open run keeps it open and shows its result`, ON, async ($, on) => {
+    world(on)
+    await worker($, 'a1')
+    await worker($, 'a2', 'Task two')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a2' })
+    await finish($, 'a2', 'answer', 'finished it')
+    expect((await detail(ui, 'a2'))?.slice(-2)).toEqual(['Result', '  finished it'])
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+  })
+
+  // -- closing the pane resets the open run
+  for (const mode of ['keep', 'clear-on-close'] as const) {
+    test(`${surface}: finished "${mode}": closing the pane with /agents-info closes the open block`, { options: { activity: 'on', finished: mode } }, async ($, on) => {
+      const w = world(on)
+      await worker($, 'a1')
+      await worker($, 'a2', 'Task two')
+      await finish($, 'a1')
+      await $.command.run({ command: 'agents-info', args: 'open' } as never)
+      const ui = await mountPane($, surface)
+      await ui.press({ key: 'act-a2' })
+      expect(w.st.value.panel).toMatchObject({ expandedId: 'a2' })
+
+      await $.command.run({ command: 'agents-info', args: '' } as never) // closes
+      expect(w.pane.closed).toBe(1)
+      expect(w.st.value.panel).toMatchObject({ expandedId: '' })
+      expect(await detailNode(ui, 'a2')).toBeUndefined()
+      // The finished run is gone with `clear-on-close`; the running one stays, and opens again with a press.
+      expect((await actKeys(ui)).includes('act-a1')).toBe(mode === 'keep')
+      await ui.press({ key: 'act-a2' })
+      expect((await detail(ui, 'a2'))?.[0]).toBe('Brief')
+    })
+  }
+
+  test(`${surface}: the band's own panel button closes the pane and the open block with it`, { options: { activity: 'on', band: 'agents' } }, async ($, on) => {
+    const w = world(on)
+    await worker($)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    const b = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+    await b.press({ key: 'savvy-agents' })
+    expect(w.pane.closed).toBe(1)
+    expect(w.st.value.panel).toMatchObject({ expandedId: '' })
+  })
+
+  test(`${surface}: closing writes the panel only when a run was open`, ON, async ($, on) => {
+    const w = world(on)
+    await worker($)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    const before = w.st.writes.panel ?? 0
+    await $.command.run({ command: 'agents-info', args: '' } as never)
+    expect(w.st.writes.panel ?? 0).toBe(before)
+  })
+
+  test(`${surface}: activity off never writes the panel on close`, async ($, on) => {
+    const w = world(on)
+    await worker($)
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    await $.command.run({ command: 'agents-info', args: '' } as never)
+    expect(w.st.writes.panel).toBeUndefined()
+  })
+
+  // The kit raises no `ui.close` of its own, so the person's close mark and an unload (origin `unload`: the hook leaves the block
+  // alone) cannot be driven here; both are read from `ui.close` in register.tsx.
+
+  test(`${surface}: an open run that leaves the list draws nothing and the next press works`, ON, async ($, on) => {
+    world(on)
+    await worker($, 'a1')
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'act-a1' })
+    await finish($, 'a1')
+    await $.tool.call({ tool: PROGRESS, title: 'Next flow', total: 1, phase: 'delegate' } as never) // prunes the finished run
+    expect(await detailNode(ui, 'a1')).toBeUndefined()
+    await worker($, 'a3', 'Task three')
+    await ui.press({ key: 'act-a3' })
+    expect((await detail(ui, 'a3'))?.[1]).toBe('  Task three')
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Desktop only: the grid behind the rows is as tall as what is drawn over it.
+
+const gridHeight = async (ui: Pane): Promise<number> =>
+  (await ui.findAll({ type: 'Svg' })).filter(el => el.props.alt === 'dotted grid').reduce((sum, el) => sum + Number(el.props.height), 0)
+
+// Header 44 + 2 section lines of 24 + one 66px row; each button and each detail line is another 24.
+const BASE = 44 + 2 * 24 + 66
+
+test('desktop: activity off leaves the grid as tall as before', async ($, on) => {
+  world(on)
+  await worker($)
+  expect(await gridHeight(await mountPane($, 'desktop'))).toBe(BASE)
+})
+
+test('desktop: the grid adds a line for each details button and each line of the open block', ON, async ($, on) => {
+  world(on)
+  await worker($)
+  const ui = await mountPane($, 'desktop')
+  expect(await gridHeight(ui)).toBe(BASE + 24)
+  await ui.press({ key: 'act-a1' })
+  // Brief, its line, Activity, its line, Step, its line.
+  expect(await gridHeight(ui)).toBe(BASE + 24 + 6 * 24)
+  await ui.press({ key: 'act-a1' })
+  expect(await gridHeight(ui)).toBe(BASE + 24)
+})
+
+test('desktop: finished rows hidden by the done section add no button to the grid', ON, async ($, on) => {
+  world(on)
+  await worker($)
+  await finish($, 'a1')
+  const ui = await mountPane($, 'desktop')
+  await ui.press({ key: 'done' })
+  // Header, the Finished line and its toggle only: no row, no button.
+  expect(await gridHeight(ui)).toBe(44 + 2 * 24)
+})
+
+test('desktop: the costume of a run does not change when its block opens or a call lands', { options: { activity: 'on', costumes: 'rotate' } }, async ($, on) => {
+  world(on)
+  await spawn($, 'a1')
+  await spawn($, 'a2')
+  const costume = async (ui: Pane, id: string) => {
+    const src = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).find(t => t.includes(`Work ${id}`)) ?? ''
+    return /class="c-(\w+)/.exec(src)?.[1]
+  }
+  const ui = await mountPane($, 'desktop')
+  const before = [await costume(ui, 'a1'), await costume(ui, 'a2')]
+  expect(before[0]).toBeDefined()
+  await ui.press({ key: 'act-a1' })
+  await call($, 'a1', 'Bash', { command: 'ls' })
+  await call($, 'a2', 'Bash', { command: 'ls' })
+  expect([await costume(ui, 'a1'), await costume(ui, 'a2')]).toEqual(before)
 })

@@ -83,6 +83,15 @@ const STRINGS = {
     runningWord: 'running',
     doneWord: 'done',
     noneRunning: 'No agents running',
+    details: 'details',
+    brief: 'Brief',
+    calls: 'Activity',
+    stepWord: 'Step',
+    resultWord: 'Result',
+    agoNow: 'now',
+    agoS: 's',
+    agoM: 'm',
+    agoH: 'h',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -119,6 +128,15 @@ const STRINGS = {
     runningWord: 'в работе',
     doneWord: 'готово',
     noneRunning: 'Нет работающих агентов',
+    details: 'подробности',
+    brief: 'Задание',
+    calls: 'Действия',
+    stepWord: 'Шаг',
+    resultWord: 'Результат',
+    agoNow: 'сейчас',
+    agoS: 'с',
+    agoM: 'м',
+    agoH: 'ч',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
@@ -155,6 +173,15 @@ const STRINGS = {
     runningWord: 'בעבודה',
     doneWord: 'הושלמו',
     noneRunning: 'אין סוכנים בעבודה',
+    details: 'פרטים',
+    brief: 'משימה',
+    calls: 'פעילות',
+    stepWord: 'שלב',
+    resultWord: 'תוצאה',
+    agoNow: 'עכשיו',
+    agoS: 'שנ׳',
+    agoM: 'דק׳',
+    agoH: 'שע׳',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
   },
@@ -887,7 +914,35 @@ const callEntry = (e: Record<string, unknown>): string => {
   }
 }
 
-const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean, isRotating: boolean): string => {
+// "now", "12s", "3m", "2h": how long ago, from the pane's own clock.
+const ago = (ms: number): string => {
+  const s = Math.floor(Math.max(0, ms) / 1000)
+  const t = tr()
+  return s < 1 ? t.agoNow : s < 60 ? `${s}${t.agoS}` : s < 3600 ? `${Math.floor(s / 60)}${t.agoM}` : `${Math.floor(s / 3600)}${t.agoH}`
+}
+
+// A step note as drawn: with `activity` on, notes stored before it (or by anything else) are masked and cut here too.
+const noteOf = (a: AgentRun, isActivity: boolean): string | undefined => (isActivity && a.stepNote ? safe(a.stepNote, MAX_TEXT) : a.stepNote)
+
+// The open block of a run, one row per line: labels, then what they head, indented; a part the run does not have is left out.
+type DetailLine = { text: string; isLabel: boolean }
+
+const detailOf = (a: AgentRun, at: number): DetailLine[] => {
+  const s = tr()
+  const head = (text: string): DetailLine => ({ text, isLabel: true })
+  const body = (text: string): DetailLine => ({ text: `  ${text}`, isLabel: false })
+  const calls = [...(a.activity ?? [])].reverse()
+  const note = noteOf(a, true)
+  const result = a.status === 'running' ? undefined : a.result
+  return [
+    ...(a.brief ? [head(s.brief), ...a.brief.split('\n').map(body)] : []),
+    ...(calls.length ? [head(s.calls), ...calls.map(c => body(`${ago(at - c.at)}  ${c.text}`))] : []),
+    ...(note ? [head(s.stepWord), body(note)] : []),
+    ...(result ? [head(s.resultWord), ...result.split('\n').map(body)] : []),
+  ]
+}
+
+const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean, isRotating: boolean, isActivity: boolean): string => {
   const s = tr()
   const tier = tierOf(a.type)
   const { costume, color } = lookOf(a, isRotating)
@@ -899,7 +954,8 @@ const agentSvg = (W: number, a: AgentRun, at: number, isCostShown: boolean, isRo
   const barW = textW
   const progress = progressOf(a)
   const stats = `${s.ctx} ${ctx}% · ${fmtTokens(a.contextTokens)}  ${isCostShown ? `≈${fmtCost(a.costUsd)}  ` : ''}${fmtTime(elapsed(a, at))}`
-  const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' · ' + a.stepNote : ''}` : ''
+  const note = noteOf(a, isActivity)
+  const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${note ? ' · ' + note : ''}` : ''
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
   const fillW = Math.round(barW * (progress ?? ctx / 100))
@@ -974,11 +1030,18 @@ const isPaneOpen = async ($: EngineInterface): Promise<boolean> => {
   }
 }
 
-// Opens the agents pane, or closes it when it is up; true when it ends up open.
-async function togglePane($: EngineInterface): Promise<boolean> {
+// An open block closes with the pane: written only when one was open, and only with `activity` on.
+async function closeDetails($: EngineInterface, isActivity: boolean): Promise<void> {
+  if (!isActivity || !(await read($, panel)).expandedId) return
+  await update($, panel, prev => ({ ...prev, expandedId: '' }))
+}
+
+// Opens the agents pane, or closes it when it is up (and the block that was open with it); true when it ends up open.
+async function togglePane($: EngineInterface, isActivity = false): Promise<boolean> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
   if (isOpen) {
     await $.ui.close({ id: PANE })
+    await closeDetails($, isActivity)
     return false
   }
   const at = await $.clock.now()
@@ -1073,7 +1136,7 @@ export const register: Register = (on, options) => {
       await $.ui.open({ id: PANE, title: tr().pane })
       return { text: tr().opened }
     }
-    const isOpen = await togglePane($)
+    const isOpen = await togglePane($, options.activity === 'on')
     return { text: isOpen ? tr().opened : tr().closed }
   })
 
@@ -1284,6 +1347,8 @@ export const register: Register = (on, options) => {
         ids: [...new Set([...clearedIds(prev), ...all.filter(a => a.status !== 'running').map(a => a.id)])].filter(id => present.has(id)),
       }))
     }
+    // The person's close mark comes only this way; our own toggles reset it themselves (a close made from a button's handler may not reach this hook).
+    if (e.id === PANE && e.origin.kind !== 'unload') await closeDetails($, options.activity === 'on')
     return closed
   })
 
@@ -1330,7 +1395,28 @@ export const register: Register = (on, options) => {
     const isEmpty = list.length === 0 && planned.length === 0
     const isCostShown = options.cost !== 'hide'
     const isRotating = options.costumes === 'rotate'
+    const isActivity = options.activity === 'on'
     const summary = `${isCostShown ? `≈${fmtCost(t.cost)}, ` : ''}${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+
+    // One run is open at a time; a press on the open one closes it. Written from the press, never while drawing.
+    const openToggle = (a: AgentRun, text: string) => (
+      <Button
+        key={`act-${a.id}`}
+        label={`${p.expandedId === a.id ? '▾' : isRtl() ? '◂' : '▸'} ${text}`}
+        plain
+        onPress={() => update($, panel, prev => ({ ...prev, expandedId: prev.expandedId === a.id ? '' : a.id }))}
+      />
+    )
+    // Each line is one row, cut at the edge; labels read right to left in Hebrew, what the worker wrote left to right.
+    const detailBox = (a: AgentRun) => (
+      <Box key={`det-${a.id}`} flexDirection="column" alignItems={isRtl() ? 'flex-end' : undefined}>
+        {detailOf(a, at).map((l, i) => (
+          <Text key={`l${i}`} dimColor wrap="truncate-end" dir={isRtl() ? (l.isLabel ? 'rtl' : 'ltr') : undefined}>
+            {l.text}
+          </Text>
+        ))}
+      </Box>
+    )
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui
@@ -1353,7 +1439,16 @@ export const register: Register = (on, options) => {
       }
       const shownDone = p.isDoneCollapsed ? 0 : finished.length
       const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      // With `activity`, each drawn row adds its button's line, and the open block its lines.
+      const drawn = [...running, ...(p.isDoneCollapsed ? [] : finished)]
+      const open = isActivity ? drawn.find(a => a.id === p.expandedId) : undefined
+      const extraLines = isActivity ? drawn.length + (open ? detailOf(open, at).length : 0) : 0
+      const gridH = headerHeight(title) + (lines + extraLines) * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      // A row's Svg, and under it with `activity` its button and, when open, its block.
+      const rowOf = (a: AgentRun, word: string) => [
+        <Svg key={a.id} source={agentSvg(W, a, at, isCostShown, isRotating, isActivity)} alt={`${a.description}: ${modelName(a.model)}, ${word}`} width={W} height={66} />,
+        ...(isActivity ? [openToggle(a, s.details), ...(p.expandedId === a.id ? [detailBox(a)] : [])] : []),
+      ]
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1366,14 +1461,9 @@ export const register: Register = (on, options) => {
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
             {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
-            {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at, isCostShown, isRotating)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
-            ))}
+            {running.flatMap(a => rowOf(a, s.isRunning))}
             {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed &&
-              finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at, isCostShown, isRotating)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
-              ))}
+            {!p.isDoneCollapsed && finished.flatMap(a => rowOf(a, s.isFinished))}
             {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
             {planned.map(pl => (
               <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
@@ -1392,14 +1482,19 @@ export const register: Register = (on, options) => {
       const ctx = ctxOf(a)
       const progress = progressOf(a)
       const model = runModel(a)
-      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
+      const note = noteOf(a, isActivity)
+      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${note ? ' ' + note : ''} · ` : ''
       return (
         <Box key={a.id} flexDirection="column" marginBottom={1}>
           <Box flexDirection="row" gap={1}>
             <Text color={color}>▣</Text>
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
-            </Text>
+            {isActivity ? (
+              openToggle(a, a.description || a.type)
+            ) : (
+              <Text bold wrap="truncate-end">
+                {a.description || a.type}
+              </Text>
+            )}
             <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
           </Box>
           <Text dimColor wrap="truncate-end">
@@ -1415,6 +1510,7 @@ export const register: Register = (on, options) => {
               {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} {isCostShown ? `≈${fmtCost(a.costUsd)} ` : ''}{fmtTime(elapsed(a, at))}
             </Text>
           </Text>
+          {isActivity && p.expandedId === a.id && detailBox(a)}
         </Box>
       )
     }
@@ -1500,7 +1596,7 @@ export const register: Register = (on, options) => {
         key="savvy-agents"
         label={toggleLabel}
         onPress={async () => {
-          await togglePane($)
+          await togglePane($, options.activity === 'on')
           $.ui.invalidate('ui.render')
         }}
       />
