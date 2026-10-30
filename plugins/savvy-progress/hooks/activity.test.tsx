@@ -39,14 +39,14 @@ const world = (on: On, tap?: ($: Engine, e: Record<string, unknown>) => Promise<
   })
   on('agent.spawn', (_$, e) => {
     prompts.push(e.prompt)
-    return { model: MODEL, agentId: e.tool_use_id } as never
+    return { model: MODEL, agentId: e.resume?.agentId ?? e.tool_use_id } as never
   })
   on('turn.complete', () => ({ text: '' }) as never)
   // A test holds a model step open by setting `gate.hold`; the step answers once it resolves.
-  const gate: { hold?: Promise<void> } = {}
+  const gate: { hold?: Promise<void>; noUsage?: boolean } = {}
   on('turn.step', async function* () {
     await gate.hold
-    return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: MODEL, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
+    return { turnId: 'turn', index: 0, answer: '', toolUses: [], stopReason: 'end_turn', usage: gate.noUsage ? null : { model: MODEL, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as never
   })
   on('tool.call', async ($$, e) => {
     seen.push(e as never)
@@ -368,6 +368,16 @@ const MASKS: [name: string, input: string, masked: string, secret: string][] = [
   ['a backslash-escaped LF inside a quoted value', 'login password="abc\\\ndefghi" tail', 'login password=••• tail', 'abc\\\ndefghi'],
   ['a backslash-escaped CRLF inside a quoted value', "login token='abc\\\r\ndefghi' tail", 'login token=••• tail', 'abc\\\r\ndefghi'],
   ['mysql -P (the port) next to -p<x>', 'mysql -P 3306 -pS3cretPw db', 'mysql -P 3306 -p••• db', 'S3cretPw'],
+  ['--password "<x with a space>"', 'login --password "hello secretdata" run', 'login --password ••• run', 'hello secretdata'],
+  ['--password \'<x with a space>\'', "login --password 'hello secretdata' run", 'login --password ••• run', 'hello secretdata'],
+  ['--password="<x with a space>"', 'login --password="hello secretdata" run', 'login --password=••• run', 'hello secretdata'],
+  ['--password "<x with an escaped quote>"', 'login --password "abcd\\" efghijk" run', 'login --password ••• run', 'abcd\\" efghijk'],
+  ['--password "<x across an escaped line end>"', 'login --password "abcd\\\nefghijk" run', 'login --password ••• run', 'abcd\\\nefghijk'],
+  ['mysql -p"<x with a space>"', 'mysql -u root -p"abcd efgh" db', 'mysql -u root -p••• db', 'abcd efgh'],
+  ["mysql -p '<x with a space>'", "mysql -p 'abcd efgh' db", 'mysql -p ••• db', 'abcd efgh'],
+  ['mysql -p<x> next to a quoted part', 'mysql -pabcd"efgh ijkl" db', 'mysql -p••• db', 'abcdefgh ijkl'],
+  ['an Authorization value with an escaped quote', 'authorization: "foo\\" secretword" tail', 'authorization: ••• tail', 'foo\\" secretword'],
+  ['an Authorization value across an escaped line end', "Authorization: 'foo\\\nsecretword' tail", 'Authorization: ••• tail', 'foo\\\nsecretword'],
   ['mysql -p <x>', 'mysql -p S3cretPw', 'mysql -p •••', 'S3cretPw'],
   ['URL userinfo', 'psql postgres://u:S3cretPw@h/db', 'psql postgres://u:•••@h/db', 'S3cretPw'],
   ['Authorization header', "curl -H 'Authorization: Bearer abc123xyz'", "curl -H 'Authorization: •••'", 'abc123xyz'],
@@ -991,3 +1001,156 @@ test('desktop: the costume of a run does not change when its block opens or a ca
   await call($, 'a2', 'Bash', { command: 'ls' })
   expect([await costume(ui, 'a1'), await costume(ui, 'a2')]).toEqual(before)
 })
+
+// ---------------------------------------------------------------------------
+// A resumed agent (SendMessage) is the same run again: the engine raises `agent.spawn` for it with `resume`, then model steps.
+
+const respawn = async ($: Engine, id: string, agentId: string) => {
+  await $.agent.spawn({ tool_use_id: id, prompt: 'more', description: 'resumed', subagentType: 'general-purpose', provider: 'engine', parentModel: MODEL, background: false, fork: false, resume: { agentId } } as never)
+}
+
+const CLOSE = ($: Engine) => $.command.run({ command: 'agents-info', args: '' } as never)
+
+for (const costumes of ['savvy', 'rotate'] as const) {
+  test(`resume (costumes "${costumes}"): the run keeps its row, history, clock and costume and is running again`, { options: { activity: 'on', costumes } }, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1', { prompt: 'Original task', desc: 'Same work' })
+    await spawn($, 'a2')
+    await call($, 'a1', 'Bash', { command: 'first' })
+    await finish($, 'a1', 'answer', 'first answer')
+    await w.clock.advance(5000)
+    const before = run(w, 'a1')
+    const rotation = w.st.writes.rotation
+    await respawn($, 'r1', 'a1')
+    await resume($, 'a1')
+    expect(runs(w).filter(a => a.agentId === 'a1')).toHaveLength(1)
+    const after = run(w, 'a1')
+    expect(after).toMatchObject({ status: 'running', startedAt: before?.startedAt, round: before?.round, brief: 'Original task', description: 'Same work' })
+    expect(after?.costume).toBe(before?.costume)
+    expect(after?.endedAt).toBeUndefined()
+    expect(after?.result).toBeUndefined()
+    expect(after?.steps).toBe(1)
+    expect(texts(w, 'a1')).toEqual(['Bash: first'])
+    expect(w.st.writes.rotation).toBe(rotation)
+  })
+}
+
+test('resume: with the option off the run is kept too', async ($, on) => {
+  const w = world(on)
+  await spawn($, 'a1', { desc: 'Same work' })
+  await finish($, 'a1')
+  await w.clock.advance(5000)
+  await respawn($, 'r1', 'a1')
+  expect(runs(w)).toHaveLength(1)
+  expect(run(w, 'a1')).toMatchObject({ status: 'running', startedAt: 0, round: 1, description: 'Same work' })
+})
+
+test('resume: an id with no row starts a new one, as before', ON, async ($, on) => {
+  const w = world(on)
+  await respawn($, 'r1', 'ghost')
+  expect(runs(w).map(a => a.id)).toEqual(['ghost'])
+  expect(run(w, 'ghost')).toMatchObject({ status: 'running', round: 1 })
+})
+
+test('resume (finished "clear-on-close"): a cleared run is listed again, under Running', { options: { finished: 'clear-on-close' } }, async ($, on) => {
+  world(on)
+  await spawn($, 'a1')
+  await finish($, 'a1')
+  await $.command.run({ command: 'agents-info', args: 'open' } as never)
+  await CLOSE($)
+  const running = async () => {
+    const ui = await mountPane($, 'terminal')
+    const n = (await ui.findAll({ type: 'Text', text: /^Running · 1$/ })).length
+    await ui.unmount()
+    return n
+  }
+  expect(await running()).toBe(0)
+  await respawn($, 'r1', 'a1')
+  expect(await running()).toBe(1)
+})
+
+// -- a resumed step flips the run at its start, not when it returns
+
+for (const mode of ['off', 'on'] as const) {
+  const options: Record<string, string> = mode === 'on' ? { activity: 'on' } : {}
+  test(`resume step (activity ${mode}): the run is Running, and listed after a clear, while the step is pending`, { options: { ...options, finished: 'clear-on-close' } }, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    await $.command.run({ command: 'agents-info', args: 'open' } as never)
+    await CLOSE($)
+    let release = () => {}
+    w.gate.hold = new Promise<void>(r => (release = r))
+    const stepping = resume($, 'a1')
+    await w.clock.settle()
+    expect(run(w, 'a1')).toMatchObject({ status: 'running' })
+    expect(run(w, 'a1')?.endedAt).toBeUndefined()
+    const ui = await mountPane($, 'terminal')
+    expect((await ui.findAll({ type: 'Text', text: /^Running · 1$/ })).length).toBe(1)
+    release()
+    await stepping
+    expect(run(w, 'a1')).toMatchObject({ status: 'running', steps: 1 })
+  })
+
+  test(`resume step (activity ${mode}): a step that returns no usage still leaves the run running`, { options }, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    w.gate.noUsage = true
+    await resume($, 'a1')
+    expect(run(w, 'a1')).toMatchObject({ status: 'running', steps: 0 })
+    expect(run(w, 'a1')?.endedAt).toBeUndefined()
+  })
+}
+
+test('resume step: a running run is not written to by a step that only reads', async ($, on) => {
+  const w = world(on)
+  await spawn($, 'a1')
+  w.gate.noUsage = true
+  const before = writes(w)
+  await resume($, 'a1')
+  expect(writes(w)).toEqual(before)
+})
+
+// -- planned task titles are held to the same length as the flow's
+
+test('flow: a planned title is stored at most 120 characters, and still matches its Agent description by its start', async ($, on) => {
+  const w = world(on)
+  const long = `Refactor ${'the parser '.repeat(20)}`.trim()
+  await $.tool.call({ tool: PROGRESS, title: 'Ship', total: 2, phase: 'delegate', tasks: [{ title: long, tier: 'light' }, { title: 'Normal title', tier: 'light' }] } as never)
+  const flow = w.st.value.flow as { tasks: { title: string }[] }
+  expect(flow.tasks[0]?.title).toHaveLength(120)
+  expect(flow.tasks[0]?.title.endsWith('…')).toBe(true)
+  expect(flow.tasks[1]?.title).toBe('Normal title')
+  const planned = async () => {
+    const ui = await mountPane($, 'terminal')
+    const found = (await ui.findAll({ type: 'Text', text: /^Planned · / })).map(t => t.text)
+    await ui.unmount()
+    return found
+  }
+  expect(await planned()).toEqual(['Planned · 2'])
+  await spawn($, 'a1', { desc: long })
+  expect(await planned()).toEqual(['Planned · 1'])
+  await spawn($, 'a2', { desc: 'Normal title' })
+  expect(await planned()).toEqual([])
+})
+
+// An unclosed quote runs to the end of the text, so it is the last thing in each channel.
+for (const [name, input, masked, secret] of [
+  ['--password "<unclosed x>"', 'login --password "abcd efghijk', 'login --password •••', 'abcd efghijk'],
+  ['an unclosed Authorization value', 'authorization: "foo secretdata', 'authorization: •••', 'foo secretdata'],
+] as const) {
+  test(`activity on: ${name} is masked to the end in the tool summary, brief, step note and result`, ON, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1', { prompt: `Do the thing\n${input}` })
+    await call($, 'a1', 'Bash', { command: input })
+    await call($, 'a1', STEP, { done: 1, total: 2, note: input })
+    await finish($, 'a1', 'answer', input)
+    const a = run(w, 'a1')
+    expect(a?.brief).toBe(`Do the thing\n${masked}`)
+    expect(a?.activity?.[0]?.text).toBe(`Bash: ${masked}`)
+    expect(a?.stepNote).toBe(masked)
+    expect(a?.result).toBe(masked)
+    expect(leaks(JSON.stringify(a), secret)).toBe(false)
+  })
+}

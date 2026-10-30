@@ -238,7 +238,7 @@ const cleanTasks = (tasks: ProgressInput['tasks']): PlannedTask[] | undefined =>
     ?.filter(t => t.title?.trim())
     .slice(0, MAX_TASKS)
     .map(t => ({
-      title: (t.title ?? '').trim(),
+      title: clip((t.title ?? '').trim(), MAX_TITLE),
       tier: tierName(t.tier ?? ''),
       after: (t.after ?? []).filter(n => Number.isInteger(n) && n > 0).slice(0, MAX_AFTER),
     }))
@@ -562,10 +562,15 @@ const elapsed = (a: AgentRun, at: number): number => (a.endedAt ?? Math.max(at, 
 
 type Planned = PlannedTask & { n: number }
 
+// A title is matched to the Agent description it was planned for. One cut to MAX_TITLE (it ends in `…`) is matched by its start.
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   if (!f || f.isFinished) return []
-  const started = new Set(list.map(a => norm(a.description)))
-  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !started.has(norm(t.title)))
+  const started = list.map(a => norm(a.description))
+  const isStarted = (t: PlannedTask): boolean => {
+    const title = norm(t.title)
+    return t.title.endsWith('…') ? started.some(d => d.startsWith(title)) : started.includes(title)
+  }
+  return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !isStarted(t))
 }
 
 // The ids a clear hides. A value stored by an older version (`{ at }`) has none.
@@ -838,7 +843,10 @@ const MAX_CALLS = 10
 const MAX_RAW = 4000
 
 // A value after `key=`: a quoted string (spaces and escaped quotes and all, an unclosed one runs to the end) or a run up to a space or quote.
-const VALUE = `"(?:[^"\\\\]|\\\\[\\s\\S])*"?|'(?:[^'\\\\]|\\\\[\\s\\S])*'?|[^\\s'"]+`
+const QUOTED = `"(?:[^"\\\\]|\\\\[\\s\\S])*"?|'(?:[^'\\\\]|\\\\[\\s\\S])*'?`
+const VALUE = `${QUOTED}|[^\\s'"]+`
+// What a shell reads as one word: quoted and bare parts run together, as in -pabc"d e".
+const WORD = `(?:${VALUE})+`
 const SECRET_KEY = 'password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth|key'
 
 const anyCase = (word: string): string => [...word].map(c => `[${c}${c.toUpperCase()}]`).join('')
@@ -848,12 +856,12 @@ const MASKS: [RegExp, string][] = [
   // postgres://user:pass@host
   [/(:\/\/[^\s:@/]+:)\S*@/g, `$1${MASK}@`],
   // Authorization: Basic …, "Authorization": "Bearer …"; the rest of the header goes.
-  [/(\bAuthorization["']?[ \t]*[:=][ \t]*)(?:"[^"]*"|'[^']*'|[^\r\n'"]*)/gi, `$1${MASK}`],
+  [new RegExp(`(\\bAuthorization["']?[ \\t]*[:=][ \\t]*)(?:${QUOTED}|[^\\r\\n'"]*)`, 'gi'), `$1${MASK}`],
   [/\b(Bearer[ \t]+)[^\s'"]+/gi, `$1${MASK}`],
   // mysql -pS3cret and mysql -p S3cret; only after the mysql family, so `mkdir -p dir` stays.
   // The command's name is any case; `-p` is not (`-P` is the port).
-  [new RegExp(`\\b((?:${['mysql', 'mysqldump', 'mariadb'].map(anyCase).join('|')})\\b[^\\n|;&]*?[ \\t]-p[ \\t]*)(?!-)\\S+`, 'g'), `$1${MASK}`],
-  [/(--passw(?:or)?d[ \t]+)(?![-\s])\S+/gi, `$1${MASK}`],
+  [new RegExp(`\\b((?:${['mysql', 'mysqldump', 'mariadb'].map(anyCase).join('|')})\\b[^\\n|;&]*?[ \\t]-p[ \\t]*)(?!-)${WORD}`, 'g'), `$1${MASK}`],
+  [new RegExp(`(--passw(?:or)?d[ \\t]+)(?![-\\s])${WORD}`, 'gi'), `$1${MASK}`],
   // key=value, key: value, "key": "value"; a longer name that ends in one (PGPASSWORD, GITHUB_TOKEN) counts.
   [new RegExp(`\\b([\\w.-]*?(?:${SECRET_KEY}))(["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gi'), `$1$2${MASK}`],
   // Keys that announce themselves: sk-…, ghp_…, github_pat_…, xoxb-…, AKIA….
@@ -1216,18 +1224,24 @@ export const register: Register = (on, options) => {
     if (started.deny !== undefined) return started
 
     const at = await $.clock.now()
+    // A resumed agent is the same run again: its row, history, clock and costume stay; it only runs once more.
+    const resumed = e.resume ? (await read($, agents)).find(a => a.agentId === (started.agentId ?? e.resume?.agentId)) : undefined
     // The brief is the worker's own prompt, before the step-report line was added to it.
     const brief = options.activity === 'on' ? linesOf(e.prompt) : undefined
     // `costumes: "rotate"`: deal the next tier costume, in spawn order; Explore keeps its own.
     let costume: string | undefined
-    if (options.costumes === 'rotate') {
+    if (options.costumes === 'rotate' && !resumed) {
       if (e.subagentType === 'Explore') costume = 'explore'
       else {
         const dealt = await update($, rotation, r => ({ next: r.next + 1 }))
         costume = TIERS[((dealt?.next ?? 1) - 1) % TIERS.length]
       }
     }
-    await update($, agents, list => {
+    if (resumed) {
+      await update($, agents, list =>
+        list.map(a => (a.id !== resumed.id ? a : { ...a, status: 'running', endedAt: undefined, ...(options.activity === 'on' ? { result: undefined } : {}) })),
+      )
+    } else await update($, agents, list => {
       const round = 1 + list.filter(a => norm(a.description) === norm(e.description) && e.description).length
       const run: AgentRun = {
         id: started.agentId ?? e.tool_use_id,
@@ -1249,7 +1263,7 @@ export const register: Register = (on, options) => {
       return [...list.filter(a => a.id !== run.id), run].slice(-200)
     })
     await update($, now, () => at)
-    await unclear($, [started.agentId ?? e.tool_use_id])
+    await unclear($, [resumed?.id ?? started.agentId ?? e.tool_use_id])
     // A new subagent brings the crew band back after its ✕.
     await update($, crewBand, () => ({ isDismissed: false }))
     if (e.subagentType.startsWith('savvy-')) {
@@ -1263,9 +1277,15 @@ export const register: Register = (on, options) => {
 
   // Each model request of a subagent: live context, tokens and cost.
   on('turn.step', async function* ($, e, next) {
-    // A resumed run's old answer is not this turn's: it goes as the step starts, not when it ends.
-    if (options.activity === 'on' && e.agentId && (await read($, agents)).some(a => a.agentId === e.agentId && a.result !== undefined)) {
-      await update($, agents, list => list.map(a => (a.agentId === e.agentId ? { ...a, result: undefined } : a)))
+    // A resumed run is running as its step starts, not when the step returns; its old answer is not this turn's.
+    const stale = e.agentId
+      ? (await read($, agents)).filter(a => a.agentId === e.agentId && (a.status !== 'running' || (options.activity === 'on' && a.result !== undefined)))
+      : []
+    if (stale.length) {
+      await update($, agents, list =>
+        list.map(a => (a.agentId !== e.agentId ? a : { ...a, status: 'running', endedAt: undefined, ...(options.activity === 'on' ? { result: undefined } : {}) })),
+      )
+      await unclear($, stale.map(a => a.id))
     }
     const result = yield* next(e)
     const agentId = e.agentId
