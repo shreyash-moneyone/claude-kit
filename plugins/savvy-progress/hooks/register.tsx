@@ -838,7 +838,7 @@ const MAX_CALLS = 10
 const MAX_RAW = 4000
 
 // A value after `key=`: a quoted string (spaces and escaped quotes and all, an unclosed one runs to the end) or a run up to a space or quote.
-const VALUE = `"(?:[^"\\\\]|\\\\.)*"?|'(?:[^'\\\\]|\\\\.)*'?|[^\\s'"]+`
+const VALUE = `"(?:[^"\\\\]|\\\\[\\s\\S])*"?|'(?:[^'\\\\]|\\\\[\\s\\S])*'?|[^\\s'"]+`
 const SECRET_KEY = 'password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth|key'
 
 const anyCase = (word: string): string => [...word].map(c => `[${c}${c.toUpperCase()}]`).join('')

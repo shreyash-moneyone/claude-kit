@@ -365,6 +365,9 @@ const MASKS: [name: string, input: string, masked: string, secret: string][] = [
   ['an escaped double quote in a quoted value', 'login password="abc\\"defghi" tail', 'login password=••• tail', 'abc\\"defghi'],
   ['an escaped single quote in a quoted value', "login token='abc\\'defghi' tail", 'login token=••• tail', "abc\\'defghi"],
   ['an escaped backslash before the closing quote', 'login secret="abcdefghi\\\\" tail', 'login secret=••• tail', 'abcdefghi'],
+  ['a backslash-escaped LF inside a quoted value', 'login password="abc\\\ndefghi" tail', 'login password=••• tail', 'abc\\\ndefghi'],
+  ['a backslash-escaped CRLF inside a quoted value', "login token='abc\\\r\ndefghi' tail", 'login token=••• tail', 'abc\\\r\ndefghi'],
+  ['mysql -P (the port) next to -p<x>', 'mysql -P 3306 -pS3cretPw db', 'mysql -P 3306 -p••• db', 'S3cretPw'],
   ['mysql -p <x>', 'mysql -p S3cretPw', 'mysql -p •••', 'S3cretPw'],
   ['URL userinfo', 'psql postgres://u:S3cretPw@h/db', 'psql postgres://u:•••@h/db', 'S3cretPw'],
   ['Authorization header', "curl -H 'Authorization: Bearer abc123xyz'", "curl -H 'Authorization: •••'", 'abc123xyz'],
@@ -477,12 +480,18 @@ test('activity on: a quoted secret that spans lines is masked before the lines a
   expect((run(w, 'a1'))?.brief).toBe('a\npassword=•••\nz')
 })
 
-test('activity on: an adversarial 4000-character quoted value is masked quickly', ON, async ($, on) => {
+test('activity on: an adversarial 4000-character quoted value is masked quickly and fully', ON, async ($, on) => {
   const w = world(on)
   await spawn($, 'a1')
   const started = Date.now()
-  for (const evil of [`password="${'\\"'.repeat(1300)}`, `token='${'\\\\'.repeat(2000)}`, `key=${'"'.repeat(4000)}`]) await call($, 'a1', 'Bash', { command: evil })
+  for (const evil of [`password="${'\\"'.repeat(1300)}`, `token='${'\\\\'.repeat(2000)}`, `key=${'"'.repeat(4000)}`, `secret="${'\\\n'.repeat(1300)}`]) await call($, 'a1', 'Bash', { command: evil })
   expect(Date.now() - started).toBeLessThan(2000)
+  const [a, b, c, d] = texts(w, 'a1')
+  expect(a).toBe('Bash: password=•••')
+  // The 4000-character cap can leave one unpaired backslash of the input behind; no more.
+  expect(b).toMatch(/^Bash: token=•••\\?$/)
+  expect(c?.startsWith('Bash: key=•••')).toBe(true)
+  expect(d).toBe('Bash: secret=•••')
   expect(texts(w, 'a1').every(t => t.length <= 80)).toBe(true)
 })
 
