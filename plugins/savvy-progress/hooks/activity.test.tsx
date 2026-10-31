@@ -1306,3 +1306,50 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 }
+
+// -- every model-derived string is made safe where it is drawn, whatever an earlier version stored
+
+const BAD = 'x\u0001y\uD83D\u0007z'
+
+for (const mode of ['on', 'off'] as const) {
+  for (const surface of SURFACES) {
+    test(`${surface}: legacy runs holding control characters and lone surrogates in every text draw clean (activity ${mode})`, { options: { activity: mode } }, async ($, on) => {
+      world(on)
+      const old = { ...OLD_RUN, type: `type${BAD}`, description: `desc${BAD}`, model: `claude-model${BAD}`, effort: `high${BAD}`, status: 'done', endedAt: 1000, stepNote: `note${BAD}`, stepDone: 1, stepTotal: 2, brief: `brief${BAD}\nsecond${BAD}`, activity: [{ at: 0, text: `Bash: act${BAD}` }], result: `result${BAD}` }
+      on('state.get', { plugin: PLUGIN, key: 'agents' } as never, (() => ({ value: { value: [old], version: 0 } })) as never)
+      const ui = await mountPane($, surface)
+      if (mode === 'on') await ui.press({ key: 'act-a1' })
+      const text = await everything(ui)
+      expect(text).toContain('desc')
+      if (mode === 'on') expect(text).toContain('result')
+      expect(text).not.toMatch(CTRL)
+      expect(text).not.toMatch(LONE)
+      await ui.unmount()
+      const band = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND } as never)
+      const bandText = await everything(band as never)
+      expect(bandText).not.toMatch(CTRL)
+      expect(bandText).not.toMatch(LONE)
+      await band.unmount()
+    })
+  }
+}
+
+test('activity on: a brief cut at the 4000-character limit through an emoji leaves no half of it', ON, async ($, on) => {
+  const w = world(on)
+  await spawn($, 'a1', { prompt: `${'\n'.repeat(3999)}😀` })
+  await finish($, 'a1', 'answer', `${'\n'.repeat(3999)}😀`)
+  const a = run(w, 'a1')
+  expect(a?.brief ?? '').not.toMatch(LONE)
+  expect(a?.result ?? '').not.toMatch(LONE)
+})
+
+test('flow: a flow stored with the title an earlier version clipped through an emoji is the same flow when the raw title is re-reported', async ($, on) => {
+  const w = world(on)
+  const raw = `${'a'.repeat(118)}😀 tail`
+  // The earlier clip counted UTF-16 units: 119 of them, then `…`.
+  const legacy = `${raw.slice(0, 119)}…`
+  on('state.get', { plugin: PLUGIN, key: 'flow' } as never, (() => ({ value: { value: { title: legacy, total: 4, done: 2, running: 0, phase: 'delegate', isFinished: false, tasks: [] }, version: 0 } })) as never)
+  await $.tool.call({ tool: PROGRESS, title: raw, phase: 'review' } as never)
+  expect(w.st.value.flow).toMatchObject({ total: 4, done: 2, phase: 'review' })
+  expect((w.st.value.flow as { title: string }).title).not.toMatch(LONE)
+})

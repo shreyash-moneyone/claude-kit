@@ -225,7 +225,7 @@ const blank = (): Flow => ({
 })
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
-  !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
+  !prev || prev.isFinished || (input.title !== undefined && ![clip, legacyClip].some(cut => cut(input.title?.trim() ?? '', MAX_TITLE) === prev.title))
 
 // Only a known tier is kept: the name is later a key into the tier tables.
 const tierName = (v: string): string => {
@@ -296,7 +296,21 @@ const NOT_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFE\uFFF
 const plain = (s: string): string => s.replace(NOT_XML, '')
 
 // Stored text stays as the model gave it (every comparison is raw against raw); what is drawn is `plain`, legacy state included.
-const shownRuns = (list: AgentRun[]): AgentRun[] => list.map(a => ({ ...a, description: plain(a.description ?? '') }))
+const shownRuns = (list: AgentRun[]): AgentRun[] =>
+  list.map(a => {
+    const opt = (v: string | undefined): string | undefined => (typeof v === 'string' ? plain(v) : v)
+    return {
+      ...a,
+      type: plain(a.type ?? ''),
+      description: plain(a.description ?? ''),
+      model: plain(a.model ?? ''),
+      effort: opt(a.effort),
+      stepNote: opt(a.stepNote),
+      brief: opt(a.brief),
+      result: opt(a.result),
+      ...(a.activity ? { activity: a.activity.map(x => ({ ...x, text: plain(x.text ?? '') })) } : {}),
+    }
+  })
 const shownFlow = (f: Flow | null): Flow | null => f && { ...f, title: plain(f.title ?? ''), tasks: (f.tasks ?? []).map(t => ({ ...t, title: plain(t.title ?? '') })) }
 
 const xml = (s: string): string =>
@@ -307,6 +321,8 @@ const clip = (s: string, max: number): string => {
   const cs = [...s]
   return cs.length > max ? cs.slice(0, Math.max(1, max - 1)).join('') + '…' : s
 }
+// What an earlier version stored for a long title: cut by UTF-16 units, so an emoji at the limit was split.
+const legacyClip = (s: string, max: number): string => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
 
 // CJK, fullwidth forms and emoji advance about 1em; at 0.56em a Chinese title was sized at half its width and the bar drew over it.
 // 中日韩文字、全角标点和 emoji 约占 1em；按 0.56em 算时中文标题宽度被低估近一半，进度条会压到标题上。
@@ -908,7 +924,10 @@ const BLOB = /[A-Za-z0-9+/_=-]{32,}/g
 const isBlob = (run: string): boolean =>
   /\d/.test(run) && /[A-Za-z]/.test(run) && !(run.includes('/') && run.split('/').every(part => part.length <= 24))
 
-const mask = (s: string): string => MASKS.reduce((t, [re, to]) => t.replace(re, to), s.slice(0, MAX_RAW)).replace(BLOB, run => (isBlob(run) ? MASK : run))
+// The first MAX_RAW characters, without half of a surrogate pair at the cut.
+const cutRaw = (s: string, n: number): string => (s.length > n && /[\uD800-\uDBFF]/.test(s.charAt(n - 1)) ? s.slice(0, n - 1) : s.slice(0, n))
+
+const mask = (s: string): string => MASKS.reduce((t, [re, to]) => t.replace(re, to), cutRaw(s, MAX_RAW)).replace(BLOB, run => (isBlob(run) ? MASK : run))
 
 // Mask, then cut.
 const safe = (s: string, max: number): string => clip(mask(s), max)
