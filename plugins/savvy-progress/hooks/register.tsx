@@ -225,7 +225,7 @@ const blank = (): Flow => ({
 })
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
-  !prev || prev.isFinished || (input.title !== undefined && clip(plain(input.title).trim(), MAX_TITLE) !== prev.title)
+  !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
 
 // Only a known tier is kept: the name is later a key into the tier tables.
 const tierName = (v: string): string => {
@@ -235,12 +235,12 @@ const tierName = (v: string): string => {
 
 const cleanTasks = (tasks: ProgressInput['tasks']): PlannedTask[] | undefined =>
   tasks
-    ?.map(t => ({ ...t, title: plain(t.title ?? '').trim() }))
+    ?.map(t => ({ ...t, title: (t.title ?? '').trim() }))
     .filter(t => t.title)
     .slice(0, MAX_TASKS)
     .map(t => ({
       title: clip(t.title, MAX_TITLE),
-      ...(t.title.length > MAX_TITLE ? { isClipped: true } : {}),
+      ...([...t.title].length > MAX_TITLE ? { isClipped: true } : {}),
       tier: tierName(t.tier ?? ''),
       after: (t.after ?? []).filter(n => Number.isInteger(n) && n > 0).slice(0, MAX_AFTER),
     }))
@@ -254,7 +254,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
   const phase = input.phase && PHASES.includes(input.phase) ? input.phase : base.phase
   return {
     ...base,
-    title: clip(plain(input.title ?? '').trim() || base.title, MAX_TITLE),
+    title: clip(input.title?.trim() || base.title, MAX_TITLE),
     total,
     done,
     phase: input.finished ? 'close' : phase,
@@ -295,10 +295,18 @@ const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-ser
 const NOT_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
 const plain = (s: string): string => s.replace(NOT_XML, '')
 
+// Stored text stays as the model gave it (every comparison is raw against raw); what is drawn is `plain`, legacy state included.
+const shownRuns = (list: AgentRun[]): AgentRun[] => list.map(a => ({ ...a, description: plain(a.description ?? '') }))
+const shownFlow = (f: Flow | null): Flow | null => f && { ...f, title: plain(f.title ?? ''), tasks: (f.tasks ?? []).map(t => ({ ...t, title: plain(t.title ?? '') })) }
+
 const xml = (s: string): string =>
   plain(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
 
-const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
+// By code point: a cut through an emoji would leave half a surrogate pair, which no drawing accepts.
+const clip = (s: string, max: number): string => {
+  const cs = [...s]
+  return cs.length > max ? cs.slice(0, Math.max(1, max - 1)).join('') + '…' : s
+}
 
 // CJK, fullwidth forms and emoji advance about 1em; at 0.56em a Chinese title was sized at half its width and the bar drew over it.
 // 中日韩文字、全角标点和 emoji 约占 1em；按 0.56em 算时中文标题宽度被低估近一半，进度条会压到标题上。
@@ -1285,7 +1293,7 @@ export const register: Register = (on, options) => {
         id: started.agentId ?? e.tool_use_id,
         agentId: started.agentId,
         type: e.subagentType,
-        description: plain(e.description),
+        description: e.description,
         model: started.model,
         status: 'running',
         startedAt: at,
@@ -1428,15 +1436,17 @@ export const register: Register = (on, options) => {
     const s = tr()
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
-    const all = await read($, agents)
+    const stored = await read($, agents)
+    const all = shownRuns(stored)
     const list = visibleOf(all, options.finished === 'clear-on-close' ? clearedIds(await read($, cleared)) : [])
-    const f = await read($, flow)
+    const storedFlow = await read($, flow)
+    const f = shownFlow(storedFlow)
     const p: Panel = await read($, panel)
     const at = Math.max(await read($, now), ...all.map(a => a.startedAt), 0)
 
     const running = list.filter(a => a.status === 'running').reverse()
     const finished = list.filter(a => a.status !== 'running').reverse()
-    const planned = plannedOf(f, all)
+    const planned = plannedOf(storedFlow, stored).map(pl => ({ ...pl, title: plain(pl.title) }))
     const t = totals(all, at)
     // The pane's title says "Agents"; inside, only the flow's own name.
     const title = f && !f.isFinished ? f.title : ''
@@ -1634,7 +1644,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, flow)
+    const f = shownFlow(await read($, flow))
     if (e.props.hasSurvey || (f === null && options.band !== 'agents')) return next(e)
     const all = await read($, agents)
     const list = visibleOf(all, options.finished === 'clear-on-close' ? clearedIds(await read($, cleared)) : [])

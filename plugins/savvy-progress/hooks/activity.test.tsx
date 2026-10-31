@@ -1245,3 +1245,64 @@ test('flow: a planned task stored without the flag is matched exactly, even when
   await spawn($, 'a2', { desc: 'Normal title' })
   expect(await plannedCount($)).toEqual(['Planned · 1'])
 })
+
+// -- stored text stays as given; only what is drawn is made safe
+
+const CTRL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/
+const LONE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
+test('flow: two agents whose description holds a control character are rounds 1 and 2', async ($, on) => {
+  const w = world(on)
+  await spawn($, 'a1', { desc: 'Fix\u0001bug' })
+  await spawn($, 'a2', { desc: 'Fix\u0001bug' })
+  expect([run(w, 'a1')?.round, run(w, 'a2')?.round]).toEqual([1, 2])
+})
+
+test('flow: a flow stored with a control character in its title is the same flow when re-reported with that title', async ($, on) => {
+  const w = world(on)
+  on('state.get', { plugin: PLUGIN, key: 'flow' } as never, (() => ({ value: { value: { title: 'Ship\u0001it', total: 4, done: 2, running: 0, phase: 'delegate', isFinished: false, tasks: [] }, version: 0 } })) as never)
+  await $.tool.call({ tool: PROGRESS, title: 'Ship\u0001it', phase: 'review' } as never)
+  expect(w.st.value.flow).toMatchObject({ title: 'Ship\u0001it', total: 4, done: 2, phase: 'review' })
+})
+
+test('flow: a planned title with a control character matches the agent described with it', async ($, on) => {
+  world(on)
+  await $.tool.call({ tool: PROGRESS, title: 'Ship', total: 1, phase: 'delegate', tasks: [{ title: 'Fix\u0001bug', tier: 'light' }] } as never)
+  expect(await plannedCount($)).toEqual(['Planned · 1'])
+  await spawn($, 'a1', { desc: 'Fix\u0001bug' })
+  expect(await plannedCount($)).toEqual([])
+})
+
+const BAND = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+
+for (const surface of SURFACES) {
+  test(`${surface}: state stored by an earlier version with control characters in its texts still draws, clean`, async ($, on) => {
+    world(on)
+    const old = { ...OLD_RUN, description: 'Work\u0001 a\u0007b', status: 'done', endedAt: 1000 }
+    on('state.get', { plugin: PLUGIN, key: 'agents' } as never, (() => ({ value: { value: [old], version: 0 } })) as never)
+    on('state.get', { plugin: PLUGIN, key: 'flow' } as never, (() => ({ value: { value: { title: 'Ship\u0001it', total: 2, done: 1, running: 0, phase: 'delegate', isFinished: false, tasks: [{ title: 'Plan\u0007 more', tier: 'light', after: [] }] }, version: 0 } })) as never)
+    const ui = await mountPane($, surface)
+    const text = await everything(ui)
+    expect(text).toContain('Ship')
+    expect(text).toContain('Plan')
+    expect(text).not.toMatch(CTRL)
+    await ui.unmount()
+    const band = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: BAND } as never)
+    expect(await everything(band as never)).not.toMatch(CTRL)
+    await band.unmount()
+  })
+
+  test(`${surface}: a title or description cut through an emoji leaves no half of it in the drawing`, async ($, on) => {
+    const w = world(on)
+    const title = `${'a'.repeat(118)}😀 tail`
+    await $.tool.call({ tool: PROGRESS, title, total: 1, phase: 'delegate', tasks: [{ title, tier: 'light' }] } as never)
+    const stored = w.st.value.flow as { title: string; tasks: { title: string }[] }
+    expect(stored.title).not.toMatch(LONE)
+    expect(stored.tasks[0]?.title).not.toMatch(LONE)
+    expect([...(stored.tasks[0]?.title ?? '')]).toHaveLength(120)
+    await spawn($, 'a1', { desc: `${'😀'.repeat(60)} tail` })
+    const ui = await mountPane($, surface)
+    expect(await everything(ui)).not.toMatch(LONE)
+    await ui.unmount()
+  })
+}
