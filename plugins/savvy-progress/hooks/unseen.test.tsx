@@ -15,15 +15,27 @@ const FLOW = { options: { band: 'flow' } } as const
 // The world beneath the plugin. `pane.isOpen` stands for the engine's pane list; `writes` counts the crewBand writes that landed.
 const setup = (on: On) => {
   mock.clock(on)
-  const pane = { isOpen: false, writes: 0 }
+  // `isPlaced` false: the pane waits undrawn; `refuse`: the open is refused and no pane is listed; `hold`: the next pane list is read now, answered later.
+  const pane = { isOpen: false, isPlaced: true, refuse: false, writes: 0, hold: undefined as Promise<void> | undefined, reached: () => {} }
   on('state.set', async (_$, e, next) => {
     const set = await next(e)
     if (e.key === 'crewBand' && (set as unknown as { value?: { isSet?: boolean } }).value?.isSet) pane.writes++
     return set
   })
-  on('ui.open', () => ((pane.isOpen = true), { value: { isPlaced: true } }))
+  on('ui.open', () => {
+    if (pane.refuse) return { value: { isPlaced: false, reason: 'no room' } } as never
+    pane.isOpen = true
+    return { value: { isPlaced: pane.isPlaced } } as never
+  })
   on('ui.close', () => ((pane.isOpen = false), { value: undefined }) as never)
-  on('ui.panes', () => ({ value: pane.isOpen ? [{ id: PANE }] : [] }) as never)
+  on('ui.panes', async () => {
+    const listed = pane.isOpen ? [{ id: PANE, isPlaced: pane.isPlaced }] : []
+    const hold = pane.hold
+    pane.hold = undefined
+    if (hold) pane.reached()
+    await hold
+    return { value: listed } as never
+  })
   on('agent.spawn', (_$, e) => ({ model: MODEL, agentId: e.resume?.agentId ?? e.tool_use_id }) as never)
   on('turn.complete', () => ({ text: '' }) as never)
   on('turn.step', async function* () {
@@ -236,3 +248,124 @@ test('unseen: writes crewBand only when its seen state changes', UNSEEN, async (
 })
 
 const OLD_DONE = { id: 'a1', agentId: 'a1', type: 'general-purpose', description: 'Work a1', model: MODEL, status: 'done', startedAt: 0, endedAt: 1, contextTokens: 0, contextMax: 1e6, tokens: 0, costUsd: 0, steps: 0, round: 1 }
+
+const resume = async ($: Engine, id: string) => {
+  const stream = ($.turn.step as (e: unknown) => AsyncIterable<unknown>)({ turnId: 'turn', index: 0, model: MODEL, messageCount: 1, agentId: id })
+  for await (const _ of stream) void _
+}
+
+for (const surface of SURFACES) {
+  test(`${surface}: unseen: a pane that waits undrawn (auto-open on a narrow window) has shown nothing`, { options: { band: 'unseen', autoOpen: 'any' } }, async ($, on) => {
+    const pane = setup(on)
+    pane.isPlaced = false
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    expect(await labelNow($, surface)).toBeDefined()
+    pane.isPlaced = true
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: a refused open has shown nothing; a later placed one has`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    pane.refuse = true
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBe(SHOWN)
+    const b = await bandOf($, surface)
+    await b.ui.press({ key: 'savvy-agents' })
+    expect(await labelNow($, surface)).toBe(SHOWN)
+    pane.refuse = false
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: a pane that opens between the last completion's read and its write still counts as seen`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    let release = () => {}
+    pane.hold = new Promise<void>(r => (release = r))
+    const reached = new Promise<void>(r => (pane.reached = r))
+    const finishing = finish($, 'a1') // reads the pane list: closed
+    await reached
+    await openByCommand($) // the pane opens; nothing is unseen yet
+    release()
+    await finishing
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: a step resume brings back a dismissed band, and its completion is judged anew`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    const b = await bandOf($, surface)
+    await b.ui.press({ key: 'savvy-dismiss' })
+    expect(await labelNow($, surface)).toBeUndefined()
+    await resume($, 'a1')
+    expect(await labelNow($, surface)).toBe(SHOWN)
+    await finish($, 'a1')
+    expect(await labelNow($, surface)).toBe(SHOWN) // pane closed: unseen
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+    pane.isOpen = false
+    await resume($, 'a1')
+    await openByCommand($)
+    await finish($, 'a1') // pane placed and open
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: agents: a step resume leaves a dismissed band dismissed, as before`, AGENTS, async ($, on) => {
+    setup(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    const b = await bandOf($, surface)
+    await b.ui.press({ key: 'savvy-dismiss' })
+    await resume($, 'a1')
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: one mounted band follows completion, open, close and clear-on-close`, { options: { band: 'unseen', finished: 'clear-on-close' } }, async ($, on) => {
+    setup(on)
+    const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AbovePrompt', props: band })
+    const label = async () => (await ui.find({ key: 'savvy-agents' }))?.props.label
+    expect(await label()).toBeUndefined()
+    await spawn($, 'a1')
+    expect(await label()).toBe(SHOWN)
+    await finish($, 'a1')
+    expect(await label()).toBe(SHOWN)
+    await openByCommand($)
+    expect(await label()).toBeUndefined()
+    await $.command.run({ command: 'agents-info' } as never) // toggles it closed
+    expect(await label()).toBeUndefined()
+    await spawn($, 'a2')
+    expect(await label()).toBe(SHOWN)
+    await finish($, 'a2')
+    expect(await label()).toBe(SHOWN)
+    await ui.press({ key: 'savvy-agents' })
+    expect(await label()).toBeUndefined()
+  })
+}
+
+test('unseen: a completion writes crewBand only on a real transition of a tracked run', UNSEEN, async ($, on) => {
+  const pane = setup(on)
+  await spawn($, 'a1')
+  await spawn($, 'a2')
+  const w = () => pane.writes
+  const before = w()
+  await finish($, 'ghost') // untracked
+  expect(w()).toBe(before)
+  await openByCommand($)
+  await finish($, 'a1') // a2 runs
+  expect(w()).toBe(before)
+  await finish($, 'a2') // last, pane open, already seen
+  expect(w()).toBe(before)
+  pane.isOpen = false
+  await spawn($, 'a3')
+  const mid = w()
+  await finish($, 'a3') // unseen: one write
+  expect(w()).toBe(mid + 1)
+  await finish($, 'a3') // finishes again while already unseen
+  await finish($, 'ghost')
+  expect(w()).toBe(mid + 1)
+})

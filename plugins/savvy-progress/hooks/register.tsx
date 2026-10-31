@@ -1113,6 +1113,15 @@ const isPaneOpen = async ($: EngineInterface): Promise<boolean> => {
   }
 }
 
+// Whether the pane is drawn: one that waits undrawn (a narrow window, `isPlaced` false) has shown the person nothing.
+const isPanePlaced = async ($: EngineInterface): Promise<boolean> => {
+  try {
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced !== false)
+  } catch {
+    return false
+  }
+}
+
 // An open block closes with the pane: written only when one was open, and only with `activity` on.
 async function closeDetails($: EngineInterface, isActivity: boolean): Promise<void> {
   if (!isActivity || !(await read($, panel)).expandedId) return
@@ -1137,8 +1146,8 @@ async function togglePane($: EngineInterface, isActivity = false): Promise<boole
 const isUnseen = (b: CrewBand): boolean => b.doneAt !== undefined && b.seenAt === undefined
 
 // The panel shows the results now: written only when some were unseen.
-async function markSeen($: EngineInterface, options: { band?: string }): Promise<void> {
-  if (options.band !== 'unseen' || !isUnseen(await read($, crewBand))) return
+async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<void> {
+  if (options.band !== 'unseen' || !isPlaced || !isUnseen(await read($, crewBand)) || !(await isPanePlaced($))) return
   const at = await $.clock.now()
   await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seenAt: at } : prev))
 }
@@ -1365,6 +1374,8 @@ export const register: Register = (on, options) => {
       ? (await read($, agents)).filter(a => a.agentId === e.agentId && (a.status !== 'running' || (options.activity === 'on' && a.result !== undefined)))
       : []
     if (stale.length) {
+      // A genuine resume (a finished row runs again) is a new run to the unseen band, as a spawn is: one write.
+      if (options.band === 'unseen' && stale.some(a => a.status !== 'running')) await update($, crewBand, () => ({ isDismissed: false }))
       await update($, agents, list =>
         list.map(a => (a.agentId !== e.agentId ? a : { ...a, status: 'running', endedAt: undefined, ...(options.activity === 'on' ? { result: undefined } : {}) })),
       )
@@ -1440,9 +1451,17 @@ export const register: Register = (on, options) => {
       )
       await update($, now, () => at)
       // `band: "unseen"`: the last one to finish leaves its results seen if the panel is up, unseen if not.
-      if (options.band === 'unseen' && !(await read($, agents)).some(a => a.status === 'running')) {
-        const isOpen = await isPaneOpen($)
-        await update($, crewBand, prev => (isOpen ? (isUnseen(prev) ? { ...prev, seenAt: at } : prev) : isUnseen(prev) ? prev : { ...prev, doneAt: at, seenAt: undefined }))
+      // Only a tracked run's completion can change it, and only a real transition writes.
+      const runs = await read($, agents)
+      if (options.band === 'unseen' && runs.some(a => a.agentId === agentId) && !runs.some(a => a.status === 'running')) {
+        const isPlaced = await isPanePlaced($)
+        const prev = await read($, crewBand)
+        if (isPlaced) await markSeen($, options)
+        else if (!isUnseen(prev)) {
+          await update($, crewBand, p => ({ ...p, doneAt: at, seenAt: undefined }))
+          // The pane may have opened since it was read; the open found nothing unseen yet.
+          await markSeen($, options)
+        }
       }
     }
     return next(e)
@@ -1471,7 +1490,7 @@ export const register: Register = (on, options) => {
   on('ui.open', async ($, e, next) => {
     const opened = await next(e)
     if (e.id === PANE) {
-      await markSeen($, options)
+      await markSeen($, options, (opened as { isPlaced?: boolean } | undefined)?.isPlaced !== false)
       $.ui.invalidate('ui.render')
     }
     return opened
@@ -1719,7 +1738,7 @@ export const register: Register = (on, options) => {
         key="savvy-agents"
         label={toggleLabel}
         onPress={async () => {
-          // A pane opened from a button's handler may not reach `ui.open`: mark the results seen here as well.
+          // A pane opened from a button's handler may not reach `ui.open`: mark the results seen here as well (once drawn).
           if (await togglePane($, options.activity === 'on')) await markSeen($, options)
           $.ui.invalidate('ui.render')
         }}
