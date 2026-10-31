@@ -453,17 +453,25 @@ const crewStages = (running: number): CrewFit[] => {
 const crewCountsOf = (fit: CrewFit, running: number, done: number): string =>
   fit.counts === 'none' ? '' : crewText(running, done, fit.counts === 'short')
 
+// Where each part of the desktop crew row sits, and how wide the row is, for one stage; the width alone is cheap, so the
+// stage is chosen before anything is drawn.
+const crewLayout = (running: number, done: number, fit: CrewFit) => {
+  const label = fit.isTitled ? tr().pane : ''
+  const counts = crewCountsOf(fit, running, done)
+  const shown = Math.min(fit.crabs, running)
+  const more = fit.isMore ? running - shown : 0
+  const crabsX = label ? Math.ceil(16 + textWidth(label, 13) + 12) : 16
+  const moreX = crabsX + Math.max(1, shown) * CRAB_SLOT + 2
+  const countsX = Math.ceil(moreX + (more ? textWidth(`+${more}`, 12) + 8 : 0))
+  const W = Math.ceil(countsX + (counts ? textWidth(counts, 12) + 4 : 0))
+  return { label, counts, more, crabsX, moreX, countsX, W }
+}
+
 // The band without a flow, in one drawing as wide as it needs: a dot that pulses while anything runs, the
 // panel's name, one small crab per running agent (a dimmed one when none runs), and the counts.
 const crewRowSvg = (running: AgentRun[], done: number, isRotating: boolean, fit: CrewFit = crewStages(running.length)[0] as CrewFit): { source: string; width: number } => {
-  const label = fit.isTitled ? tr().pane : ''
-  const counts = crewCountsOf(fit, running.length, done)
+  const { label, counts, more, crabsX, moreX, countsX, W } = crewLayout(running.length, done, fit)
   const shown = running.slice(0, fit.crabs)
-  const more = fit.isMore ? running.length - shown.length : 0
-  const crabsX = label ? Math.ceil(16 + textWidth(label, 13) + 12) : 16
-  const moreX = crabsX + Math.max(1, shown.length) * CRAB_SLOT + 2
-  const countsX = Math.ceil(moreX + (more ? textWidth(`+${more}`, 12) + 8 : 0))
-  const W = Math.ceil(countsX + (counts ? textWidth(counts, 12) + 4 : 0))
   const crabW = CRAB_BOX * 0.8
   const crabs = shown.length
     ? shown
@@ -1715,10 +1723,12 @@ export const register: Register = (on, options) => {
         const { Svg } = ui
         const done = list.length - running.length
         // About 8 CSS px per reported column, less the button, the ✕ and their gaps (as the flow's row reckons).
-        const budget = (e.props.bodyColumns || 100) * 8 - (toggleCells + 8) * 8
+        // A window that reports no width is taken as 100 columns; one that reports 0 or too few gets the last
+        // stage: the dot, one crab, the button and the ✕.
+        const budget = (e.props.bodyColumns ?? 100) * 8 - (toggleCells + 8) * 8
         const stages = crewStages(running.length)
-        const rows = stages.map(fit => crewRowSvg(running, done, isRotating, fit))
-        const row = rows.find(r => r.width <= budget) ?? (rows.at(-1) as (typeof rows)[number])
+        const fit = stages.find(st => crewLayout(running.length, done, st).W <= budget) ?? (stages.at(-1) as CrewFit)
+        const row = crewRowSvg(running, done, isRotating, fit)
         return (
           <Box flexDirection="column">
             <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
@@ -1731,16 +1741,19 @@ export const register: Register = (on, options) => {
         )
       }
       const done = list.length - running.length
-      // Cells: ●, the name, the crabs (2 each with their gap) and `+N`, the counts, the button and the ✕ (3), and a 2-cell gap between.
+      // Cells as drawn: ●; the name; the crab box (each crab, a 1-cell gap between, then a gap and `+N`); the counts;
+      // the button, `[ label ]`, so its label and 4; the plain ✕, one cell; and a 2-cell gap between the row's children.
       const cellsOf = (fit: CrewFit): number => {
-        const shown = Math.min(fit.crabs, running.length)
-        const more = fit.isMore ? running.length - shown : 0
+        const shown = Math.max(1, Math.min(fit.crabs, running.length))
+        const more = fit.isMore ? running.length - Math.min(fit.crabs, running.length) : 0
         const counts = crewCountsOf(fit, running.length, done)
-        const parts = [1, ...(fit.isTitled ? [[...tr().pane].length] : []), 2 * Math.max(1, shown) + (more ? `+${more}`.length : 0), ...(counts ? [[...counts].length] : []), toggleCells, 3]
+        const parts = [1, ...(fit.isTitled ? [[...tr().pane].length] : []), 2 * shown - 1 + (more ? 1 + `+${more}`.length : 0), ...(counts ? [[...counts].length] : []), toggleCells, 1]
         return parts.reduce((sum, n) => sum + n, 0) + 2 * (parts.length - 1)
       }
+      // A window that reports no width is taken as 100 columns; one that reports 0 or too few gets the last stage:
+      // the ●, one crab, the button and the ✕.
       const stages = crewStages(running.length)
-      const fit = stages.find(st => cellsOf(st) <= (e.props.bodyColumns || 100)) ?? (stages.at(-1) as CrewFit)
+      const fit = stages.find(st => cellsOf(st) <= (e.props.bodyColumns ?? 100)) ?? (stages.at(-1) as CrewFit)
       const shown = running.slice(0, fit.crabs)
       const more = fit.isMore ? running.length - shown.length : 0
       const counts = crewCountsOf(fit, running.length, done)

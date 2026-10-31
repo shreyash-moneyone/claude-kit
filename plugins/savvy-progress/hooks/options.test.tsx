@@ -140,111 +140,159 @@ for (const surface of SURFACES) {
   })
 }
 
-// -- the band without a flow fits the window: 7 running and 2 done agents at 30, 40, 60 and 100 columns
+// -- the band without a flow fits the window: 7 running and 2 done agents
 
-type Drawn = { type?: string; props?: Record<string, unknown>; children?: (Drawn | string)[] }
-const nodes = (n: Drawn | string | undefined): Drawn[] => (typeof n === 'object' ? [n, ...(n.children ?? []).flatMap(nodes)] : [])
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: (Drawn | string | null)[] }
+const kidsOf = (n: Drawn | undefined): Drawn[] => (n?.children ?? []).filter((c): c is Drawn => typeof c === 'object' && c !== null)
+const nodes = (n: Drawn | string | null | undefined): Drawn[] => (typeof n === 'object' && n ? [n, ...(n.children ?? []).flatMap(nodes)] : [])
 const textOf = (n: Drawn): string => (n.children ?? []).filter((c): c is string => typeof c === 'string').join('')
 
-const crowd = async ($: Engine, on: On, isBooted = false) => {
+const crowd = async ($: Engine, on: On) => {
   setup(on)
-  if (isBooted) {
-    // The session's start is where the language is read.
-    on('session.start', () => ({ cwd: '/x' }) as never)
-    on('tool.register', () => ({ value: undefined }) as never)
-    on('command.register', () => ({ value: undefined }) as never)
-    await ($.session as unknown as { start: (e: unknown) => Promise<unknown> }).start({ source: 'startup', cwd: '/x' })
-  }
+  // The session's start is where the language is read.
+  on('session.start', () => ({ cwd: '/x' }) as never)
+  on('tool.register', () => ({ value: undefined }) as never)
+  on('command.register', () => ({ value: undefined }) as never)
+  await ($.session as unknown as { start: (e: unknown) => Promise<unknown> }).start({ source: 'startup', cwd: '/x' })
   for (let i = 0; i < 9; i++) await spawn($, `a${i}`)
   for (const id of ['a0', 'a1']) await ($.turn.complete as (e: unknown) => Promise<unknown>)({ agentId: id, reason: 'answer', answer: 'ok', usage: null })
 }
 
-const BUTTON_CELLS = 'Show panel ▸'.length + 4
-const COLUMNS = [30, 40, 60, 100] as const
-
-// The terminal row, reckoned from what it draws: cells of text, 2 per crab with its gap, the buttons, and 2 between the row's children.
-const terminalRow = async ($: Engine, bodyColumns: number) => {
-  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: { ...band, bodyColumns } as never })
-  const row = nodes((await ui.drawn()) as unknown as Drawn).find(n => n.type === 'Box' && n.props?.gap === 2)
-  const kids = row?.children as Drawn[]
-  const crabs = nodes(row).filter(n => n.type === 'Text' && textOf(n) === '▣').length
-  const cells = kids.reduce((sum, k) => {
-    if (k.type === 'Button') return sum + (k.props?.key === 'savvy-agents' ? BUTTON_CELLS : 3)
-    if (k.type === 'Box') return sum + (k.children ?? []).reduce((s, c) => s + (typeof c === 'object' && textOf(c) === '▣' ? 2 : [...textOf(c as Drawn)].length + 1), 0) - 1
-    return sum + [...textOf(k)].length
-  }, 2 * (kids.length - 1))
-  const keys = nodes(row).filter(n => n.type === 'Button').map(n => n.props?.key)
-  const texts = kids.filter(k => k.type === 'Text').map(textOf)
-  await ui.unmount()
-  return { cells, crabs, keys, texts }
+// Cells of what the terminal draws, read from the tree: a Text is its characters (every one here is one cell wide), a Button
+// `[ label ]` or, plain, the label alone, a Box its children with its own gap between them.
+const cellsIn = (n: Drawn): number => {
+  if (n.type === 'Text') return [...textOf(n)].length
+  if (n.type === 'Button') return [...String(n.props?.label)].length + (n.props?.plain ? 0 : 4)
+  const kids = kidsOf(n)
+  return kids.reduce((sum, k) => sum + cellsIn(k), 0) + Number(n.props?.gap ?? 0) * Math.max(0, kids.length - 1)
 }
 
-const desktopRow = async ($: Engine, bodyColumns: number) => {
+const terminalRow = async ($: Engine, bodyColumns: number | undefined) => {
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: { ...band, bodyColumns } as never })
+  const row = nodes((await ui.drawn()) as unknown as Drawn).find(n => n.type === 'Box' && n.props?.gap === 2) as Drawn
+  const texts = kidsOf(row).filter(k => k.type === 'Text').map(textOf)
+  const crabs = nodes(row).filter(n => n.type === 'Text' && textOf(n) === '▣').length
+  const more = nodes(row).map(textOf).find(t => /^\+\d+$/.test(t))
+  const buttons = nodes(row).filter(n => n.type === 'Button')
+  const keys = buttons.map(n => n.props?.key)
+  const label = String(buttons[0]?.props?.label)
+  await ui.unmount()
+  return { cells: cellsIn(row), crabs, more, keys, texts, label }
+}
+
+const desktopRow = async ($: Engine, bodyColumns: number | undefined) => {
   const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: { ...band, bodyColumns } as never })
   const svg = (await ui.findAll({ type: 'Svg' }))[0]
   const keys = (await ui.findAll({ type: 'Button' })).map(b => b.props.key)
   await ui.unmount()
   const source = String(svg?.props.source)
-  return { width: Number(svg?.props.width), source, keys, crabs: (source.match(/<g class="c-/g) ?? []).length }
+  return {
+    width: Number(svg?.props.width),
+    keys,
+    crabs: (source.match(/<g class="c-/g) ?? []).length,
+    hasTitle: source.includes('>Agents<'),
+    counts: source.includes('running') ? 'long' : source.includes('7 · 2') ? 'short' : 'none',
+    more: /font-size="12">(\+\d+)</.exec(source)?.[1],
+  }
 }
 
-test('terminal: the crew band fits 30, 40, 60 and 100 columns, keeping the button and the ✕ and fewer crabs as it narrows', { options: { band: 'agents' } }, async ($, on) => {
+const KEYS = ['savvy-agents', 'savvy-dismiss']
+const BAND = { options: { band: 'agents' } } as const
+
+// English, 7 running and 2 done. The button is `[ Show panel ▸ ]` (16), the ✕ is 1, ● is 1; gaps are 2 between the row's children
+// and 1 between crabs. A step costs: 5 crabs 64, 4 crabs 62, 3 crabs 60, 2 crabs 58, 1 crab 56 (name, crabs and `+N`, "7 running · 2 done"),
+// then figures "7 · 2" 43, no name 35, no figures 28 (`+6` kept), no `+N` 25.
+const TERMINAL = [
+  [200, 5, 'Agents', '7 running · 2 done', '+2'],
+  [64, 5, 'Agents', '7 running · 2 done', '+2'],
+  [63, 4, 'Agents', '7 running · 2 done', '+3'],
+  [62, 4, 'Agents', '7 running · 2 done', '+3'],
+  [61, 3, 'Agents', '7 running · 2 done', '+4'],
+  [60, 3, 'Agents', '7 running · 2 done', '+4'],
+  [59, 2, 'Agents', '7 running · 2 done', '+5'],
+  [58, 2, 'Agents', '7 running · 2 done', '+5'],
+  [57, 1, 'Agents', '7 running · 2 done', '+6'],
+  [56, 1, 'Agents', '7 running · 2 done', '+6'],
+  [55, 1, 'Agents', '7 · 2', '+6'],
+  [43, 1, 'Agents', '7 · 2', '+6'],
+  [42, 1, undefined, '7 · 2', '+6'],
+  [35, 1, undefined, '7 · 2', '+6'],
+  [34, 1, undefined, undefined, '+6'],
+  [28, 1, undefined, undefined, '+6'],
+  [27, 1, undefined, undefined, undefined],
+  [0, 1, undefined, undefined, undefined],
+] as const
+
+test('terminal: the crew band takes each step down at the width its cells run out', BAND, async ($, on) => {
   await crowd($, on)
-  const rows = []
-  for (const cols of COLUMNS) rows.push({ cols, ...(await terminalRow($, cols)) })
-  for (const r of rows) {
-    expect(r.cells).toBeLessThanOrEqual(r.cols)
-    expect(r.keys).toEqual(['savvy-agents', 'savvy-dismiss'])
-    expect(r.crabs).toBeGreaterThanOrEqual(1)
+  for (const [cols, crabs, title, counts, more] of TERMINAL) {
+    const r = await terminalRow($, cols)
+    expect({ cols, crabs: r.crabs, texts: r.texts, more: r.more, keys: r.keys }).toEqual({ cols, crabs, texts: ['●', ...(title ? [title] : []), ...(counts ? [counts] : [])], more, keys: KEYS })
+    if (cols >= 25) expect(r.cells).toBeLessThanOrEqual(cols)
   }
-  const crabs = rows.map(r => r.crabs)
-  expect(crabs).toEqual([...crabs].sort((a, b) => a - b))
-  expect(crabs.at(-1)).toBe(5)
-  // Wide: the row as it always was.
-  expect(rows.at(-1)?.texts).toEqual(['●', 'Agents', '7 running · 2 done'])
-  // Narrower: figures only, then no name.
-  expect(rows[1]?.texts.at(-1)).toBe('7 · 2')
-  expect(rows[0]?.texts).not.toContain('Agents')
+  // No width reported: as 100 columns. Width 0: the last step.
+  expect(await terminalRow($, undefined)).toEqual(await terminalRow($, 100))
+  expect((await terminalRow($, 0)).cells).toBe(25)
 })
 
-test('desktop: the crew band fits 30, 40, 60 and 100 columns, keeping the button and the ✕ and fewer crabs as it narrows', { options: { band: 'agents' } }, async ($, on) => {
+// English desktop, hand-worked from the font estimate: the row is 338, 312, 286, 260, 234 px with 5 to 1 crabs, 156 with figures,
+// 98 with no name, 66 with no figures, 44 with no `+N`; it must fit columns × 8 less the button, the ✕ and their gaps (192 px).
+const DESKTOP = [
+  [240, 5, 338, true, 'long', '+2'],
+  [67, 5, 338, true, 'long', '+2'],
+  [66, 4, 312, true, 'long', '+3'],
+  [63, 4, 312, true, 'long', '+3'],
+  [62, 3, 286, true, 'long', '+4'],
+  [60, 3, 286, true, 'long', '+4'],
+  [59, 2, 260, true, 'long', '+5'],
+  [57, 2, 260, true, 'long', '+5'],
+  [56, 1, 234, true, 'long', '+6'],
+  [54, 1, 234, true, 'long', '+6'],
+  [53, 1, 156, true, 'short', '+6'],
+  [44, 1, 156, true, 'short', '+6'],
+  [43, 1, 98, false, 'short', '+6'],
+  [37, 1, 98, false, 'short', '+6'],
+  [36, 1, 66, false, 'none', '+6'],
+  [33, 1, 66, false, 'none', '+6'],
+  [32, 1, 44, false, 'none', undefined],
+  [0, 1, 44, false, 'none', undefined],
+] as const
+
+test('desktop: the crew band takes each step down at the width its pixels run out', BAND, async ($, on) => {
   await crowd($, on)
-  const rows = []
-  for (const cols of COLUMNS) rows.push({ cols, ...(await desktopRow($, cols)) })
-  for (const r of rows) {
-    // The Svg, then the button and the ✕ with their gaps, at about 8 px per column.
-    expect(r.width + (BUTTON_CELLS + 8) * 8).toBeLessThanOrEqual(r.cols * 8)
-    expect(r.keys).toEqual(['savvy-agents', 'savvy-dismiss'])
-    expect(r.crabs).toBeGreaterThanOrEqual(1)
+  for (const [cols, crabs, width, hasTitle, counts, more] of DESKTOP) {
+    const r = await desktopRow($, cols)
+    expect({ cols, crabs: r.crabs, width: r.width, hasTitle: r.hasTitle, counts: r.counts, more: r.more, keys: r.keys }).toEqual({ cols, crabs, width, hasTitle, counts, more, keys: KEYS })
+    if (cols >= 33) expect(r.width + 192).toBeLessThanOrEqual(cols * 8)
   }
-  const crabs = rows.map(r => r.crabs)
-  expect(crabs).toEqual([...crabs].sort((a, b) => a - b))
-  expect(crabs.at(-1)).toBe(5)
-  expect(rows.at(-1)?.source).toContain('7 running · 2 done')
-  expect(rows.at(-1)?.source).toContain('Agents')
-  expect(rows[1]?.source).not.toContain('running')
-  expect(rows[0]?.source).not.toContain('Agents')
+  expect(await desktopRow($, undefined)).toEqual(await desktopRow($, 100))
 })
 
-test('desktop: a wide window draws the crew band as one fixed Svg, whatever its width', { options: { band: 'agents' } }, async ($, on) => {
-  await crowd($, on)
-  const a = await desktopRow($, 100)
-  const b = await desktopRow($, 240)
-  expect(b.source).toBe(a.source)
-  expect(b.width).toBe(a.width)
-})
+for (const language of ['ru', 'he'] as const) {
+  test(`both surfaces: the crew band in ${language} keeps in budget, with fewer crabs as it narrows and its button and ✕ always`, { options: { band: 'agents', language } }, async ($, on) => {
+    await crowd($, on)
+    const floor = await terminalRow($, 0)
+    // The narrowest row: ●, one crab, `[ label ]` and ✕, with 2-cell gaps.
+    expect(floor.cells).toBe(1 + 1 + [...floor.label].length + 4 + 1 + 6)
+    let last = 99
+    for (const cols of [100, 80, 70, 60, 50, 40, 36, 30, 20, 0]) {
+      const t = await terminalRow($, cols)
+      expect(t.keys).toEqual(KEYS)
+      if (cols >= floor.cells) expect(t.cells).toBeLessThanOrEqual(cols)
+      expect(t.crabs).toBeLessThanOrEqual(last)
+      last = t.crabs
+      const d = await desktopRow($, cols)
+      expect(d.keys).toEqual(KEYS)
+      const isLast = d.crabs === 1 && d.counts === 'none' && !d.more
+      if (!isLast) expect(d.width).toBeLessThanOrEqual(cols * 8 - ([...floor.label].length + 4 + 8) * 8)
+    }
+  })
+}
 
-test('both surfaces: Hebrew keeps the crew band in budget, right to left, with its button and ✕', { options: { band: 'agents', language: 'he' } }, async ($, on) => {
-  await crowd($, on, true)
-  const wide = await desktopRow($, 100)
-  expect(wide.source).toContain('direction="rtl"')
-  expect(wide.source).toContain('בעבודה')
-  for (const cols of [30, 40, 60]) {
-    const d = await desktopRow($, cols)
-    expect(d.width + (BUTTON_CELLS + 8) * 8).toBeLessThanOrEqual(cols * 8)
-    expect(d.keys).toEqual(['savvy-agents', 'savvy-dismiss'])
-    const t = await terminalRow($, cols)
-    expect(t.cells).toBeLessThanOrEqual(cols)
-    expect(t.keys).toEqual(['savvy-agents', 'savvy-dismiss'])
-  }
+test('desktop: Hebrew draws the crew band right to left', { options: { band: 'agents', language: 'he' } }, async ($, on) => {
+  await crowd($, on)
+  const ui = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: { ...band, bodyColumns: 100 } as never })
+  const source = String((await ui.findAll({ type: 'Svg' }))[0]?.props.source)
+  expect(source).toContain('direction="rtl"')
+  await ui.unmount()
 })
