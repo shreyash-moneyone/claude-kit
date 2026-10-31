@@ -43,11 +43,12 @@
     "band": {
       "type": "string",
       "title": "Band above the prompt",
-      "description": "flow: only while a savvy-flow plan is reported or a savvy-* worker runs; agents: also a compact band as soon as any subagent has run",
+      "description": "flow: only while a savvy-flow plan is reported or a savvy-* worker runs; agents: also a compact band as soon as any subagent has run; unseen: like agents, but hides by itself once nothing runs and you've seen the results in the panel",
       "default": "flow",
       "options": [
         "flow",
-        "agents"
+        "agents",
+        "unseen"
       ]
     },
     "finished": {
