@@ -425,6 +425,9 @@ const MASKS: [name: string, input: string, masked: string, secret: string][] = [
   ['an sk- key', 'echo sk-ant-api03-AbCdEf0123456789', 'echo •••', 'AbCdEf0123456789'],
   ['a ghp_ token', 'git clone https://ghp_abcdefgh12345678@github.com/x/y', 'git clone https://•••@github.com/x/y', 'abcdefgh12345678'],
   ['a Slack token', 'notify xoxb-1234567890-abcdefghij', 'notify •••', 'abcdefghij'],
+  ['an upper-case SK- key', 'echo SK-ANT-API03-ABCDEF0123456789', 'echo •••', 'ABCDEF0123456789'],
+  ['an upper-case GHP_ token', 'git clone https://GHP_ABCDEFGH12345678@github.com/x/y', 'git clone https://•••@github.com/x/y', 'ABCDEFGH12345678'],
+  ['a mixed-case Xoxb- Slack token', 'notify Xoxb-1234567890-ABCDEFGHIJ', 'notify •••', 'ABCDEFGHIJ'],
   ['an AWS access key id', 'aws --key AKIAIOSFODNN7EXAMPLE', 'aws --key •••', 'IOSFODNN7EXAMPLE'],
   ['a long unlabelled blob', 'curl -d aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jL5nP7r', 'curl -d •••', 'aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jL5nP7r'],
 ]
@@ -445,7 +448,7 @@ for (const [name, input, masked, secret] of MASKS) {
   })
 }
 
-const BENIGN = ['mkdir -p src/x', 'git log -p', 'echo $HOME', 'npm test', 'cat keyboard.ts', 'mysql -u root mydb']
+const BENIGN = ['skip-tests --fast', 'ask-me later', 'mkdir -p src/x', 'git log -p', 'echo $HOME', 'npm test', 'cat keyboard.ts', 'mysql -u root mydb']
 
 for (const command of BENIGN) {
   test(`activity on: "${command}" is left as it is`, ON, async ($, on) => {
@@ -1048,11 +1051,16 @@ for (const costumes of ['savvy', 'rotate'] as const) {
     await spawn($, 'a1', { prompt: 'Original task', desc: 'Same work' })
     await spawn($, 'a2')
     await call($, 'a1', 'Bash', { command: 'first' })
+    // Usage the run already has: a resume must not take it back or count it twice.
+    await resume($, 'a1')
     await finish($, 'a1', 'answer', 'first answer')
     await w.clock.advance(5000)
     const before = run(w, 'a1')
+    expect(before?.tokens).toBeGreaterThan(0)
+    expect(before?.costUsd).toBeGreaterThan(0)
     const rotation = w.st.writes.rotation
     await respawn($, 'r1', 'a1')
+    expect(run(w, 'a1')).toMatchObject({ tokens: before?.tokens, costUsd: before?.costUsd })
     await resume($, 'a1')
     expect(runs(w).filter(a => a.agentId === 'a1')).toHaveLength(1)
     const after = run(w, 'a1')
@@ -1060,7 +1068,7 @@ for (const costumes of ['savvy', 'rotate'] as const) {
     expect(after?.costume).toBe(before?.costume)
     expect(after?.endedAt).toBeUndefined()
     expect(after?.result).toBeUndefined()
-    expect(after?.steps).toBe(1)
+    expect(after?.steps).toBe((before?.steps ?? 0) + 1)
     expect(texts(w, 'a1')).toEqual(['Bash: first'])
     expect(w.st.writes.rotation).toBe(rotation)
   })
@@ -1185,3 +1193,55 @@ for (const [name, input, masked, secret] of [
     expect(leaks(JSON.stringify(a), secret)).toBe(false)
   })
 }
+
+// -- markup is not the only thing an SVG cannot hold
+
+test('desktop: control characters XML forbids are dropped from a description before it is drawn', async ($, on) => {
+  world(on)
+  await spawn($, 'a1', { desc: 'Fix\u0001 the\u0007 bug\u0000\u000B\u001F\uFFFE\uFFFF\uD800 now' })
+  const ui = await mountPane($, 'desktop')
+  const src = (await ui.findAll({ type: 'Svg' })).map(el => String(el.props.source)).find(t => t.includes('bug')) ?? ''
+  expect(src).toContain('Fix')
+  expect(src).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDFFF]/)
+  await ui.unmount()
+})
+
+// -- a planned title is clipped only when the plan said so
+
+const seedFlow = (on: On, tasks: { title: string; tier: string; after: number[]; isClipped?: boolean }[]) =>
+  on('state.get', { plugin: PLUGIN, key: 'flow' } as never, (() => ({ value: { value: { title: 'Ship', total: tasks.length, done: 0, running: 0, phase: 'delegate', isFinished: false, tasks }, version: 0 } })) as never)
+
+const plannedCount = async ($: Engine) => {
+  const ui = await mountPane($, 'terminal')
+  const found = (await ui.findAll({ type: 'Text', text: /^Planned · / })).map(t => t.text)
+  await ui.unmount()
+  return found
+}
+
+test('flow: a planned title that ends in an ellipsis of its own is matched exactly, not by its start', async ($, on) => {
+  const w = world(on)
+  await $.tool.call({ tool: PROGRESS, title: 'Ship', total: 1, phase: 'delegate', tasks: [{ title: 'Investigate…', tier: 'light' }] } as never)
+  expect((w.st.value.flow as { tasks: { isClipped?: boolean }[] }).tasks[0]?.isClipped).toBeFalsy()
+  await spawn($, 'a1', { desc: 'Investigate database' })
+  expect(await plannedCount($)).toEqual(['Planned · 1'])
+  await spawn($, 'a2', { desc: 'Investigate…' })
+  expect(await plannedCount($)).toEqual([])
+})
+
+test('flow: a 150-character planned title is flagged as clipped and matches by its start', async ($, on) => {
+  const w = world(on)
+  const long = `Refactor ${'the parser '.repeat(15)}`.trim()
+  expect(long.length).toBeGreaterThan(120)
+  await $.tool.call({ tool: PROGRESS, title: 'Ship', total: 1, phase: 'delegate', tasks: [{ title: long, tier: 'light' }] } as never)
+  expect((w.st.value.flow as { tasks: { isClipped?: boolean }[] }).tasks[0]?.isClipped).toBe(true)
+  await spawn($, 'a1', { desc: long })
+  expect(await plannedCount($)).toEqual([])
+})
+
+test('flow: a planned task stored without the flag is matched exactly, even when its title ends in an ellipsis', async ($, on) => {
+  world(on)
+  seedFlow(on, [{ title: 'Refactor the…', tier: 'light', after: [] }, { title: 'Normal title', tier: 'light', after: [] }])
+  await spawn($, 'a1', { desc: 'Refactor the parser' })
+  await spawn($, 'a2', { desc: 'Normal title' })
+  expect(await plannedCount($)).toEqual(['Planned · 1'])
+})

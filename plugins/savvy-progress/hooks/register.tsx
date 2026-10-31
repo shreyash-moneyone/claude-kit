@@ -225,7 +225,7 @@ const blank = (): Flow => ({
 })
 
 const isNewFlow = (prev: Flow | null, input: ProgressInput): boolean =>
-  !prev || prev.isFinished || (input.title !== undefined && clip(input.title.trim(), MAX_TITLE) !== prev.title)
+  !prev || prev.isFinished || (input.title !== undefined && clip(plain(input.title).trim(), MAX_TITLE) !== prev.title)
 
 // Only a known tier is kept: the name is later a key into the tier tables.
 const tierName = (v: string): string => {
@@ -235,10 +235,12 @@ const tierName = (v: string): string => {
 
 const cleanTasks = (tasks: ProgressInput['tasks']): PlannedTask[] | undefined =>
   tasks
-    ?.filter(t => t.title?.trim())
+    ?.map(t => ({ ...t, title: plain(t.title ?? '').trim() }))
+    .filter(t => t.title)
     .slice(0, MAX_TASKS)
     .map(t => ({
-      title: clip((t.title ?? '').trim(), MAX_TITLE),
+      title: clip(t.title, MAX_TITLE),
+      ...(t.title.length > MAX_TITLE ? { isClipped: true } : {}),
       tier: tierName(t.tier ?? ''),
       after: (t.after ?? []).filter(n => Number.isInteger(n) && n > 0).slice(0, MAX_AFTER),
     }))
@@ -252,7 +254,7 @@ const merge = (prev: Flow | null, input: ProgressInput): Flow => {
   const phase = input.phase && PHASES.includes(input.phase) ? input.phase : base.phase
   return {
     ...base,
-    title: clip(input.title?.trim() || base.title, MAX_TITLE),
+    title: clip(plain(input.title ?? '').trim() || base.title, MAX_TITLE),
     total,
     done,
     phase: input.finished ? 'close' : phase,
@@ -289,8 +291,12 @@ const CRAB_BOX = 30
 const CELL = 3
 const FONT = "-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI',sans-serif"
 
+// What XML 1.0 cannot hold (and the engine's text refuses): C0 and C1 controls but tab and newline, U+FFFE/U+FFFF, a lone surrogate.
+const NOT_XML = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+const plain = (s: string): string => s.replace(NOT_XML, '')
+
 const xml = (s: string): string =>
-  s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
+  plain(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
 
 const clip = (s: string, max: number): string => (s.length > max ? s.slice(0, Math.max(1, max - 1)) + '…' : s)
 
@@ -562,13 +568,13 @@ const elapsed = (a: AgentRun, at: number): number => (a.endedAt ?? Math.max(at, 
 
 type Planned = PlannedTask & { n: number }
 
-// A title is matched to the Agent description it was planned for. One cut to MAX_TITLE (it ends in `…`) is matched by its start.
+// A title is matched to the Agent description it was planned for. One cut to MAX_TITLE (`isClipped`) is matched by its start.
 const plannedOf = (f: Flow | null, list: AgentRun[]): Planned[] => {
   if (!f || f.isFinished) return []
   const started = list.map(a => norm(a.description))
   const isStarted = (t: PlannedTask): boolean => {
     const title = norm(t.title)
-    return t.title.endsWith('…') ? started.some(d => d.startsWith(title)) : started.includes(title)
+    return t.isClipped ? started.some(d => d.startsWith(title)) : started.includes(title)
   }
   return (f.tasks ?? []).map((t, i) => ({ ...t, n: i + 1 })).filter(t => !isStarted(t))
 }
@@ -864,8 +870,10 @@ const MASKS: [RegExp, string][] = [
   [new RegExp(`(--passw(?:or)?d[ \\t]+)(?![-\\s])${WORD}`, 'gi'), `$1${MASK}`],
   // key=value, key: value, "key": "value"; a longer name that ends in one (PGPASSWORD, GITHUB_TOKEN) counts.
   [new RegExp(`\\b([\\w.-]*?(?:${SECRET_KEY}))(["']?[ \\t]*[:=][ \\t]*)(?:${VALUE})`, 'gi'), `$1$2${MASK}`],
-  // Keys that announce themselves: sk-…, ghp_…, github_pat_…, xoxb-…, AKIA….
-  [/\b(?:sk-[A-Za-z0-9_-]{8,}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{6,}|AKIA[0-9A-Z]{16})/g, MASK],
+  // Keys that announce themselves: sk-…, ghp_…, github_pat_…, xoxb-… in any case (a shouted or retyped key is still one);
+  // AKIA… only as AWS writes it, so a lower-case word is left alone.
+  [/\b(?:sk-[a-z0-9_-]{8,}|(?:gh[pousr]_|github_pat_)[a-z0-9_]{8,}|xox[abprs]-[a-z0-9-]{6,})/gi, MASK],
+  [/\bAKIA[0-9A-Z]{16}/g, MASK],
 ]
 
 // A long run of base64 or hex with letters and digits is taken for a key, unless it reads as a path.
@@ -1243,8 +1251,9 @@ export const register: Register = (on, options) => {
     if (options.costumes === 'rotate' && !resumed) {
       if (e.subagentType === 'Explore') costume = 'explore'
       else {
-        const dealt = await update($, rotation, r => ({ next: r.next + 1 }))
-        costume = TIERS[((dealt?.next ?? 1) - 1) % TIERS.length]
+        // The counter wraps with the deck; a value an older version let grow still works (its remainder is what counts).
+        const dealt = await update($, rotation, r => ({ next: ((r.next % TIERS.length) + 1) % TIERS.length }))
+        costume = TIERS[((dealt?.next ?? 1) + TIERS.length - 1) % TIERS.length]
       }
     }
     if (resumed) {
@@ -1257,7 +1266,7 @@ export const register: Register = (on, options) => {
         id: started.agentId ?? e.tool_use_id,
         agentId: started.agentId,
         type: e.subagentType,
-        description: e.description,
+        description: plain(e.description),
         model: started.model,
         status: 'running',
         startedAt: at,

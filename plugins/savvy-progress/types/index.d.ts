@@ -4,6 +4,8 @@ export type PlannedTask = {
   title: string
   tier: string
   after: number[]
+  /** The title was cut to the length limit: matched to an Agent description by its start. */
+  isClipped?: boolean
 }
 
 export type Flow = {

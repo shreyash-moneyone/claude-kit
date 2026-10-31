@@ -115,3 +115,37 @@ test('desktop: "rotate" still draws a run stored without a costume', ROTATE, asy
   const l = await looks($, 'desktop', [])
   expect(l.x1?.costume).toBe('light')
 })
+
+// The counter wraps with the deck: it is stored below TIERS.length, never growing, and a value an older version stored still deals the same costume.
+const watchRotation = (on: On) => {
+  const stored: number[] = []
+  on('state.set', async (_$, e, next) => {
+    const set = await next(e)
+    if (e.key === 'rotation') stored.push((e.value as { next: number }).next)
+    return set
+  })
+  return stored
+}
+
+test('desktop: "rotate" keeps the same sequence over 7 spawns and stores a counter below 5', ROTATE, async ($, on) => {
+  setup(on)
+  const stored = watchRotation(on)
+  const ids = ['s1', 's2', 's3', 's4', 's5', 's6', 's7']
+  for (const id of ids) await spawn($, id)
+  const l = await looks($, 'desktop', [])
+  expect(ids.map(id => l[id]?.costume)).toEqual([...ORDER, 'heavy'])
+  expect(stored).toHaveLength(7)
+  expect(Math.max(...stored)).toBeLessThan(5)
+})
+
+test('desktop: "rotate" carries on from a large counter an older version stored', ROTATE, async ($, on) => {
+  setup(on)
+  const stored = watchRotation(on)
+  on('state.get', { plugin: PLUGIN, key: 'rotation' } as never, (() => ({ value: { value: { next: 4002 }, version: 0 } })) as never)
+  await spawn($, 's1')
+  const l = await looks($, 'desktop', [])
+  // 4002 deals were made: the next costume is the 4003rd, TIERS[4002 % 5].
+  expect(l.s1?.costume).toBe('careful')
+  expect(stored.every(n => n < 5)).toBe(true)
+  expect(stored).toHaveLength(1)
+})
