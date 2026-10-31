@@ -347,6 +347,7 @@ for (const surface of SURFACES) {
   })
 }
 
+// One after another: with completions at once a write may repeat, which the counter makes harmless.
 test('unseen: a completion writes crewBand only on a real transition of a tracked run', UNSEEN, async ($, on) => {
   const pane = setup(on)
   await spawn($, 'a1')
@@ -369,3 +370,61 @@ test('unseen: a completion writes crewBand only on a real transition of a tracke
   await finish($, 'ghost')
   expect(w()).toBe(mid + 1)
 })
+
+// A completion that has read the pane list and waits: `finishing` resolves when released.
+const paused = async ($: Engine, pane: ReturnType<typeof setup>, id: string) => {
+  let release = () => {}
+  pane.hold = new Promise<void>(r => (release = r))
+  const reached = new Promise<void>(r => (pane.reached = r))
+  const finishing = finish($, id)
+  await reached
+  return async () => (release(), await finishing)
+}
+
+for (const surface of SURFACES) {
+  test(`${surface}: unseen: a completion that lands after a spawn leaves the new run shown, then unseen, then seen`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    const release = await paused($, pane, 'a1')
+    await spawn($, 'a2')
+    await release()
+    expect(await labelNow($, surface)).toBe(SHOWN) // a2 runs
+    await finish($, 'a2')
+    expect(await labelNow($, surface)).toBe(SHOWN) // pane closed: unseen
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: a pane that closes after the completion read it placed counts as seen at the completion`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    await openByCommand($)
+    const release = await paused($, pane, 'a1') // read: placed
+    pane.isOpen = false
+    await release()
+    // The panel redrew with the result as the agent list changed, so it was seen.
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: two completions at once leave the results unseen, then seen`, UNSEEN, async ($, on) => {
+    setup(on)
+    await spawn($, 'a1')
+    await spawn($, 'a2')
+    await Promise.all([finish($, 'a1'), finish($, 'a2')])
+    expect(await labelNow($, surface)).toBe(SHOWN)
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: a slow completion cannot make results unseen that the panel showed while it waited`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    const release = await paused($, pane, 'a1') // a1's result is in the list; its pane read said closed
+    await spawn($, 'a2')
+    await finish($, 'a2')
+    await openByCommand($) // the panel shows both results
+    pane.isOpen = false
+    await release()
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+}

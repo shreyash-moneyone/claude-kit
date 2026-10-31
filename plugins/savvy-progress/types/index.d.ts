@@ -67,10 +67,12 @@ export type Panel = {
 /** The compact band shown without a flow (`band: "agents"`, `"unseen"`): hidden by its dismiss until the next subagent spawns. */
 export type CrewBand = {
   isDismissed: boolean
-  /** `band: "unseen"`: when the last running agent finished with the panel closed. Unset, with `seenAt` unset too, means the results are seen (state from before the option never brings a band back). */
-  doneAt?: number
-  /** `band: "unseen"`: when the panel was open to show those results; set once `doneAt` is. */
-  seenAt?: number
+  /** `band: "unseen"`: a counter that only grows, bumped by each change below. */
+  seq?: number
+  /** `band: "unseen"`: `seq` when the last running agent finished. Unset means nothing is unseen (state from before the option never brings a band back). */
+  doneSeq?: number
+  /** `band: "unseen"`: `seq` when the panel last showed the results, or when the last agent finished with it up. Results are unseen while `doneSeq` is past it. */
+  seenSeq?: number
 }
 
 /** `finished: "clear-on-close"`: ids of the runs that had finished when the panel last closed; they are not listed. */

@@ -1142,14 +1142,18 @@ async function togglePane($: EngineInterface, isActivity = false): Promise<boole
   return true
 }
 
-// `band: "unseen"`: results are unseen from the last run's end with the panel closed until the panel is up.
-const isUnseen = (b: CrewBand): boolean => b.doneAt !== undefined && b.seenAt === undefined
+// `band: "unseen"`: every change of the band's state is one `update` that decides from what it finds there, numbered by
+// a counter that only grows (clock times can tie, and reads and writes interleave). Results are unseen when the last
+// run's end (`doneSeq`) is newer than the last time the panel was drawn up (`seenSeq`).
+const isUnseen = (b: CrewBand): boolean => b.doneSeq !== undefined && b.doneSeq > (b.seenSeq ?? -1)
 
-// The panel shows the results now: written only when some were unseen.
+// A new run, or a finished one running again: the band comes back; what is unseen stays so.
+const renewed = (prev: CrewBand): CrewBand => ({ ...prev, isDismissed: false, seq: (prev.seq ?? 0) + 1 })
+
+// The panel shows the results now: written only when some were unseen, and only for a pane that is drawn.
 async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<void> {
   if (options.band !== 'unseen' || !isPlaced || !isUnseen(await read($, crewBand)) || !(await isPanePlaced($))) return
-  const at = await $.clock.now()
-  await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seenAt: at } : prev))
+  await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seq: (prev.seq ?? 0) + 1, seenSeq: (prev.seq ?? 0) + 1 } : prev))
 }
 
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
@@ -1357,7 +1361,7 @@ export const register: Register = (on, options) => {
     await update($, now, () => at)
     await unclear($, [resumed?.id ?? started.agentId ?? e.tool_use_id])
     // A new subagent brings the crew band back after its ✕; what it ran before is no longer the open question.
-    await update($, crewBand, () => ({ isDismissed: false }))
+    await update($, crewBand, prev => (options.band === 'unseen' ? renewed(prev) : { isDismissed: false }))
     if (e.subagentType.startsWith('savvy-')) {
       const f = await read($, flow)
       await autoOpen($, f && !f.isFinished ? f.title : 'savvy-flow')
@@ -1375,7 +1379,7 @@ export const register: Register = (on, options) => {
       : []
     if (stale.length) {
       // A genuine resume (a finished row runs again) is a new run to the unseen band, as a spawn is: one write.
-      if (options.band === 'unseen' && stale.some(a => a.status !== 'running')) await update($, crewBand, () => ({ isDismissed: false }))
+      if (options.band === 'unseen' && stale.some(a => a.status !== 'running')) await update($, crewBand, renewed)
       await update($, agents, list =>
         list.map(a => (a.agentId !== e.agentId ? a : { ...a, status: 'running', endedAt: undefined, ...(options.activity === 'on' ? { result: undefined } : {}) })),
       )
@@ -1425,6 +1429,8 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId
     if (agentId) {
       const at = await $.clock.now()
+      // `band: "unseen"`: where the band's counter stood before the list changed (the panel redraws from that change on).
+      const startSeq = options.band === 'unseen' ? ((await read($, crewBand)).seq ?? 0) : 0
       await update($, agents, list =>
         list.map((a): AgentRun => {
           if (a.agentId !== agentId) return a
@@ -1450,18 +1456,22 @@ export const register: Register = (on, options) => {
         }),
       )
       await update($, now, () => at)
-      // `band: "unseen"`: the last one to finish leaves its results seen if the panel is up, unseen if not.
-      // Only a tracked run's completion can change it, and only a real transition writes.
+      // `band: "unseen"`: the last one to finish leaves its results seen if the panel is up, unseen if not. A panel drawn
+      // at this moment shows the result (it redraws as the list changes), even if it closes before the write below; one
+      // drawn up since the list changed (`seenSeq` past `startSeq`) showed it too. Only a tracked run's completion counts.
       const runs = await read($, agents)
       if (options.band === 'unseen' && runs.some(a => a.agentId === agentId) && !runs.some(a => a.status === 'running')) {
         const isPlaced = await isPanePlaced($)
-        const prev = await read($, crewBand)
-        if (isPlaced) await markSeen($, options)
-        else if (!isUnseen(prev)) {
-          await update($, crewBand, p => ({ ...p, doneAt: at, seenAt: undefined }))
-          // The pane may have opened since it was read; the open found nothing unseen yet.
-          await markSeen($, options)
+        const found = await read($, crewBand)
+        // The read only skips what would change nothing; the update below is right without it.
+        if (isPlaced === isUnseen(found)) {
+          await update($, crewBand, prev => {
+            const s = (prev.seq ?? 0) + 1
+            return { ...prev, seq: s, doneSeq: s, seenSeq: isPlaced || (prev.seenSeq ?? -1) > startSeq ? s : prev.seenSeq }
+          })
         }
+        // A pane that opened while this ran found nothing unseen yet.
+        await markSeen($, options)
       }
     }
     return next(e)
@@ -1751,7 +1761,7 @@ export const register: Register = (on, options) => {
         plain
         role="dismiss"
         onPress={async () => {
-          await update($, crewBand, () => ({ isDismissed: true }))
+          await update($, crewBand, prev => ({ ...prev, isDismissed: true }))
           await update($, flow, () => null)
         }}
       />
