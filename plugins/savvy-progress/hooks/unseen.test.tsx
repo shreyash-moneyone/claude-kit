@@ -445,3 +445,33 @@ for (const surface of SURFACES) {
     expect(await labelNow($, surface)).toBe(SHOWN)
   })
 }
+
+for (const surface of SURFACES) {
+  test(`${surface}: unseen: a completion that read the pane placed credits only itself, not a result that landed before its write`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a0')
+    await finish($, 'a0') // unseen
+    pane.isOpen = true // the pane is up, with no `ui.open` for the hook to see
+    await spawn($, 'a1')
+    const release = await paused($, pane, 'a1') // read: placed
+    pane.isOpen = false
+    await spawn($, 'b1')
+    await finish($, 'b1') // pane closed: a result that was never drawn
+    await release()
+    expect(await labelNow($, surface)).toBe(SHOWN)
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+  })
+
+  test(`${surface}: unseen: an open that came before a later result does not cover it`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    await finish($, 'a1')
+    await openByCommand($)
+    expect(await labelNow($, surface)).toBeUndefined()
+    pane.isOpen = false
+    await spawn($, 'a2')
+    await finish($, 'a2')
+    expect(await labelNow($, surface)).toBe(SHOWN)
+  })
+}

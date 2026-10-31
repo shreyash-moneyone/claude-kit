@@ -1464,14 +1464,16 @@ export const register: Register = (on, options) => {
       // pane read as closed stays unseen even if it opens before the write: the fail-safe side. Only a tracked run counts.
       const runs = await read($, agents)
       if (options.band === 'unseen' && runs.some(a => a.agentId === agentId) && !runs.some(a => a.status === 'running')) {
-        const isPlaced = await isPanePlaced($)
         const found = await read($, crewBand)
+        const isPlaced = await isPanePlaced($)
         // The read only skips a panel drawn over results already seen; with the pane closed this always writes, so a
         // result that lands while an open waits to mark the older ones is recorded as newer than they are.
         if (!isPlaced || isUnseen(found)) {
           await update($, crewBand, prev => {
             const s = (prev.seq ?? 0) + 1
-            return { ...prev, seq: s, doneSeq: s, seenSeq: isPlaced ? s : prev.seenSeq }
+            // The drawn panel credits this result and what the read found, not a result that landed since.
+            const isCredited = isPlaced && prev.doneSeq === found.doneSeq
+            return { ...prev, seq: s, doneSeq: s, seenSeq: isCredited ? s : prev.seenSeq }
           })
         }
         // A pane that opened while this ran found nothing unseen yet.
