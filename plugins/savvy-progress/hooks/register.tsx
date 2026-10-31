@@ -897,8 +897,8 @@ const hostOf = (url: string): string => {
   }
 }
 
-// A leading `cd <dir> &&` (or `;`) says nothing and eats the width; drop it, repeatedly, unless nothing follows. Home paths shrink to `~/`.
-const CD_LEAD = /^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|"']+)\s*(?:&&|;)\s*/
+// A leading `cd <dir> &&` (or `;`) says nothing and eats the width; drop it, repeatedly, unless nothing follows. Home paths shrink to `~/`. Run on masked text: shortening a path can take a blob under the mask's length. A double-quoted dir may hold escaped quotes.
+const CD_LEAD = /^\s*cd\s+(?:"(?:[^"\\]|\\[\s\S])*"|'[^']*'|[^\s;&|"']+)\s*(?:&&|;)\s*/
 const HOME = /(?<![^\s"'=:(])\/(?:Users|home)\/[^/\s]+\//g
 const tidyBash = (cmd: string): string => {
   let t = cmd
@@ -906,7 +906,7 @@ const tidyBash = (cmd: string): string => {
   return t.replace(HOME, '~/')
 }
 
-// One call as a line: `Bash: npm test`, `Read register.tsx`, `srv tool`; the bare tool name when there is nothing to say.
+// One call as a line, already masked (Bash masks its command before tidying it; a second pass over masked text is not a no-op): `Bash: npm test`, `Read register.tsx`, `srv tool`; the bare tool name when there is nothing to say.
 const callText = (e: Record<string, unknown>): string => {
   const tool = String(e.tool ?? '')
   const s = (k: string): string => (typeof e[k] === 'string' ? e[k] : '')
@@ -914,7 +914,7 @@ const callText = (e: Record<string, unknown>): string => {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
   const label = mcp ? `${mcp[1]} ${mcp[2]}` : tool
   const arg =
-    tool === 'Bash' ? tidyBash(s('command'))
+    tool === 'Bash' ? tidyBash(mask(s('command')))
     : tool === 'Agent' ? s('description')
     : tool === 'Read' || tool === 'Edit' || tool === 'Write' ? name(s('file_path'))
     : tool === 'NotebookEdit' ? name(s('notebook_path'))
@@ -922,13 +922,14 @@ const callText = (e: Record<string, unknown>): string => {
     : tool === 'WebFetch' ? hostOf(s('url'))
     : tool === 'WebSearch' ? s('query')
     : ''
-  return arg ? `${label}${tool === 'Bash' || tool === 'Agent' ? ':' : ''} ${arg}` : label
+  const text = arg ? `${label}${tool === 'Bash' || tool === 'Agent' ? ':' : ''} ${arg}` : label
+  return tool === 'Bash' ? text : mask(text)
 }
 
-// The entry's text: masked, on one line, cut. A call that cannot be summed up is still named.
+// The entry's text: on one line, cut (callText has masked it). A call that cannot be summed up is still named.
 const callEntry = (e: Record<string, unknown>): string => {
   try {
-    return clip(mask(callText(e)).replace(/\s+/g, ' ').trim(), MAX_TEXT)
+    return clip(callText(e).replace(/\s+/g, ' ').trim(), MAX_TEXT)
   } catch {
     return safe(String(e.tool ?? ''), MAX_TEXT)
   }

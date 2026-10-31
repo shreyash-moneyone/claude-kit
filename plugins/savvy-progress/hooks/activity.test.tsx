@@ -150,6 +150,10 @@ const CD_CASES: [name: string, command: string, text: string][] = [
   ['a cd later in the command', 'ls && cd /tmp && ls', 'Bash: ls && cd /tmp && ls'],
   ['/home paths', 'cat /home/bob/proj/a.ts', 'Bash: cat ~/proj/a.ts'],
   ['/Users paths after the cd is gone', 'cd /tmp && cat /Users/x/a.ts /home/y/b.ts', 'Bash: cat ~/a.ts ~/b.ts'],
+  ['a blob that only drops under 32 characters once ~ shortens it', 'echo /home/bob/Ab3defghijklmnopqrstuvwxyz12', 'Bash: echo •••'],
+  ['a /Users blob that only drops under 32 characters once ~ shortens it', 'cat /Users/bob/Ab3defghijklmnopqrstuvwxyz123456', 'Bash: cat •••'],
+  ['an escaped quote inside the cd dir', 'cd "foo\\" && echo secret" && ls', 'Bash: ls'],
+  ['a secret behind an escaped quote in the cd dir', 'cd "x\\" && mysql -pS3cretPw" && ls', 'Bash: cd "x\\" && mysql -p•••'],
   ['a secret after a cd is still masked', 'cd /tmp && PGPASSWORD=S3cretPw psql', 'Bash: PGPASSWORD=••• psql'],
 ]
 
@@ -159,7 +163,9 @@ for (const [name, command, text] of CD_CASES) {
     await spawn($, 'a1')
     await call($, 'a1', 'Bash', { command })
     expect(texts(w, 'a1')).toEqual([text])
-    expect(JSON.stringify(run(w, 'a1'))).not.toContain('S3cretPw')
+    const dump = JSON.stringify(run(w, 'a1'))
+    expect(dump).not.toContain('S3cretPw')
+    expect(dump).not.toContain('Ab3defghij')
   })
 }
 
