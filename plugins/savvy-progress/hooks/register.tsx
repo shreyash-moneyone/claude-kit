@@ -399,8 +399,10 @@ ${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, 
 }
 
 // The crew line of the band without a flow: "2 running · 5 done", or that there is nothing running.
-const crewText = (running: number, done: number): string => {
+const crewText = (running: number, done: number, isShort = false): string => {
   const s = tr()
+  // Narrow: just the figures, "3 · 2"; the words are in the Svg's alt and the panel.
+  if (isShort) return `${running} · ${done}`
   const parts = [running ? `${running} ${s.runningWord}` : '', done ? `${done} ${s.doneWord}` : ''].filter(Boolean)
   return parts.length ? parts.join(' · ') : s.noneRunning
 }
@@ -410,17 +412,34 @@ const MAX_CRABS = 5
 const BUTTON_PAD = 4
 const CRAB_SLOT = 26
 
+// What the crew row keeps as the window narrows, tried in this order until one fits: fewer crabs (the rest
+// as `+N`), figures instead of words, no panel name, no counts, no `+N`. The button and the ✕ stay.
+type CrewFit = { crabs: number; counts: 'long' | 'short' | 'none'; isTitled: boolean; isMore: boolean }
+const crewStages = (running: number): CrewFit[] => {
+  const stages: CrewFit[] = []
+  for (let crabs = Math.max(1, Math.min(MAX_CRABS, running)); crabs >= 1; crabs--) stages.push({ crabs, counts: 'long', isTitled: true, isMore: true })
+  return [
+    ...stages,
+    { crabs: 1, counts: 'short', isTitled: true, isMore: true },
+    { crabs: 1, counts: 'short', isTitled: false, isMore: true },
+    { crabs: 1, counts: 'none', isTitled: false, isMore: true },
+    { crabs: 1, counts: 'none', isTitled: false, isMore: false },
+  ]
+}
+const crewCountsOf = (fit: CrewFit, running: number, done: number): string =>
+  fit.counts === 'none' ? '' : crewText(running, done, fit.counts === 'short')
+
 // The band without a flow, in one drawing as wide as it needs: a dot that pulses while anything runs, the
 // panel's name, one small crab per running agent (a dimmed one when none runs), and the counts.
-const crewRowSvg = (running: AgentRun[], done: number, isRotating: boolean): { source: string; width: number } => {
-  const label = tr().pane
-  const counts = crewText(running.length, done)
-  const shown = running.slice(0, MAX_CRABS)
-  const more = running.length - shown.length
-  const crabsX = Math.ceil(16 + textWidth(label, 13) + 12)
+const crewRowSvg = (running: AgentRun[], done: number, isRotating: boolean, fit: CrewFit = crewStages(running.length)[0] as CrewFit): { source: string; width: number } => {
+  const label = fit.isTitled ? tr().pane : ''
+  const counts = crewCountsOf(fit, running.length, done)
+  const shown = running.slice(0, fit.crabs)
+  const more = fit.isMore ? running.length - shown.length : 0
+  const crabsX = label ? Math.ceil(16 + textWidth(label, 13) + 12) : 16
   const moreX = crabsX + Math.max(1, shown.length) * CRAB_SLOT + 2
   const countsX = Math.ceil(moreX + (more ? textWidth(`+${more}`, 12) + 8 : 0))
-  const W = Math.ceil(countsX + textWidth(counts, 12) + 4)
+  const W = Math.ceil(countsX + (counts ? textWidth(counts, 12) + 4 : 0))
   const crabW = CRAB_BOX * 0.8
   const crabs = shown.length
     ? shown
@@ -437,9 +456,9 @@ const crewRowSvg = (running: AgentRun[], done: number, isRotating: boolean): { s
     W,
     H,
     `${dot}
-<text class="t" ${startText(W, 16, H / 2 + 4.5)} font-family="${FONT}" font-size="13" font-weight="500">${xml(label)}</text>
-${crabs}${more ? `<text class="s" ${startText(W, moreX, H / 2 + 4, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}
-<text class="s" ${startText(W, countsX, H / 2 + 4)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${xml(counts)}</text>`,
+${label ? `<text class="t" ${startText(W, 16, H / 2 + 4.5)} font-family="${FONT}" font-size="13" font-weight="500">${xml(label)}</text>` : ''}
+${crabs}${more ? `<text class="s" ${startText(W, moreX, H / 2 + 4, false)} font-family="${FONT}" font-size="12">+${more}</text>` : ''}${counts ? `
+<text class="s" ${startText(W, countsX, H / 2 + 4)} font-family="${FONT}" font-size="12" font-variant-numeric="tabular-nums">${xml(counts)}</text>` : ''}`,
   )
   return { source, width: W }
 }
@@ -1665,7 +1684,12 @@ export const register: Register = (on, options) => {
       // No flow: the panel's name, the crew button and the dismiss.
       if (isSvg) {
         const { Svg } = ui
-        const row = crewRowSvg(running, list.length - running.length, isRotating)
+        const done = list.length - running.length
+        // About 8 CSS px per reported column, less the button, the ✕ and their gaps (as the flow's row reckons).
+        const budget = (e.props.bodyColumns || 100) * 8 - (toggleCells + 8) * 8
+        const stages = crewStages(running.length)
+        const rows = stages.map(fit => crewRowSvg(running, done, isRotating, fit))
+        const row = rows.find(r => r.width <= budget) ?? (rows.at(-1) as (typeof rows)[number])
         return (
           <Box flexDirection="column">
             <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
@@ -1677,23 +1701,37 @@ export const register: Register = (on, options) => {
           </Box>
         )
       }
+      const done = list.length - running.length
+      // Cells: ●, the name, the crabs (2 each with their gap) and `+N`, the counts, the button and the ✕ (3), and a 2-cell gap between.
+      const cellsOf = (fit: CrewFit): number => {
+        const shown = Math.min(fit.crabs, running.length)
+        const more = fit.isMore ? running.length - shown : 0
+        const counts = crewCountsOf(fit, running.length, done)
+        const parts = [1, ...(fit.isTitled ? [[...tr().pane].length] : []), 2 * Math.max(1, shown) + (more ? `+${more}`.length : 0), ...(counts ? [[...counts].length] : []), toggleCells, 3]
+        return parts.reduce((sum, n) => sum + n, 0) + 2 * (parts.length - 1)
+      }
+      const stages = crewStages(running.length)
+      const fit = stages.find(st => cellsOf(st) <= (e.props.bodyColumns || 100)) ?? (stages.at(-1) as CrewFit)
+      const shown = running.slice(0, fit.crabs)
+      const more = fit.isMore ? running.length - shown.length : 0
+      const counts = crewCountsOf(fit, running.length, done)
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={2}>
             <Text color={isWorking ? ACCENT : undefined} dimColor={!isWorking}>
               ●
             </Text>
-            <Text bold>{tr().pane}</Text>
+            {fit.isTitled && <Text bold>{tr().pane}</Text>}
             <Box flexDirection="row" gap={1}>
-              {running.slice(0, MAX_CRABS).map(a => (
+              {shown.map(a => (
                 <Text key={a.id} color={lookOf(a, isRotating).color}>
                   ▣
                 </Text>
               ))}
               {!isWorking && <Text dimColor>▣</Text>}
-              {running.length > MAX_CRABS && <Text dimColor>+{running.length - MAX_CRABS}</Text>}
+              {more > 0 && <Text dimColor>+{more}</Text>}
             </Box>
-            <Text dimColor>{crewText(running.length, list.length - running.length)}</Text>
+            {counts ? <Text dimColor>{counts}</Text> : null}
             {crewButton}
             {dismiss}
           </Box>
