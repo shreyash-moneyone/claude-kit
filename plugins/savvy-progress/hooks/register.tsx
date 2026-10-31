@@ -897,6 +897,15 @@ const hostOf = (url: string): string => {
   }
 }
 
+// A leading `cd <dir> &&` (or `;`) says nothing and eats the width; drop it, repeatedly, unless nothing follows. Home paths shrink to `~/`.
+const CD_LEAD = /^\s*cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|"']+)\s*(?:&&|;)\s*/
+const HOME = /(?<![^\s"'=:(])\/(?:Users|home)\/[^/\s]+\//g
+const tidyBash = (cmd: string): string => {
+  let t = cmd
+  for (let m = CD_LEAD.exec(t); m && t.slice(m[0].length).trim(); m = CD_LEAD.exec(t)) t = t.slice(m[0].length)
+  return t.replace(HOME, '~/')
+}
+
 // One call as a line: `Bash: npm test`, `Read register.tsx`, `srv tool`; the bare tool name when there is nothing to say.
 const callText = (e: Record<string, unknown>): string => {
   const tool = String(e.tool ?? '')
@@ -905,7 +914,7 @@ const callText = (e: Record<string, unknown>): string => {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
   const label = mcp ? `${mcp[1]} ${mcp[2]}` : tool
   const arg =
-    tool === 'Bash' ? s('command')
+    tool === 'Bash' ? tidyBash(s('command'))
     : tool === 'Agent' ? s('description')
     : tool === 'Read' || tool === 'Edit' || tool === 'Write' ? name(s('file_path'))
     : tool === 'NotebookEdit' ? name(s('notebook_path'))

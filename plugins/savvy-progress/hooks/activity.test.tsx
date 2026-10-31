@@ -138,6 +138,31 @@ for (const [name, tool, args, text] of EXTRACTORS) {
   })
 }
 
+// A worker's `cd <dir> &&` prefix would eat the 80 columns; it goes, and home shortens to `~`.
+const CD_CASES: [name: string, command: string, text: string][] = [
+  ['a leading cd &&', 'cd /Users/shreyash/Documents/work/finpro/FinProServer && npm test', 'Bash: npm test'],
+  ['a quoted dir with a space and ;', 'cd "/Users/x/My Dir"; git diff --stat', 'Bash: git diff --stat'],
+  ['a single-quoted dir', "cd '/tmp/a b' && ls", 'Bash: ls'],
+  ['repeated cds', 'cd a && cd b && npm test', 'Bash: npm test'],
+  ['whitespace and a line end around the cd', '  cd a \n && ls  ', 'Bash: ls'],
+  ['a cd with nothing after it', 'cd /Users/x/proj', 'Bash: cd ~/proj'],
+  ['a cd then only a separator', 'cd /tmp &&', 'Bash: cd /tmp &&'],
+  ['a cd later in the command', 'ls && cd /tmp && ls', 'Bash: ls && cd /tmp && ls'],
+  ['/home paths', 'cat /home/bob/proj/a.ts', 'Bash: cat ~/proj/a.ts'],
+  ['/Users paths after the cd is gone', 'cd /tmp && cat /Users/x/a.ts /home/y/b.ts', 'Bash: cat ~/a.ts ~/b.ts'],
+  ['a secret after a cd is still masked', 'cd /tmp && PGPASSWORD=S3cretPw psql', 'Bash: PGPASSWORD=••• psql'],
+]
+
+for (const [name, command, text] of CD_CASES) {
+  test(`activity on: Bash with ${name} is recorded as "${text}"`, ON, async ($, on) => {
+    const w = world(on)
+    await spawn($, 'a1')
+    await call($, 'a1', 'Bash', { command })
+    expect(texts(w, 'a1')).toEqual([text])
+    expect(JSON.stringify(run(w, 'a1'))).not.toContain('S3cretPw')
+  })
+}
+
 test('activity on: an entry carries the time of the call', ON, async ($, on) => {
   const w = world(on)
   await spawn($, 'a1')
@@ -238,8 +263,8 @@ test('activity on: a long command is cut to 80 characters with an ellipsis', ON,
 test('activity on: a multi-line command is one line', ON, async ($, on) => {
   const w = world(on)
   await spawn($, 'a1')
-  await call($, 'a1', 'Bash', { command: 'cd x\n  && ls\r\n' })
-  expect(texts(w, 'a1')).toEqual(['Bash: cd x && ls'])
+  await call($, 'a1', 'Bash', { command: 'ls\n  -la\r\n' })
+  expect(texts(w, 'a1')).toEqual(['Bash: ls -la'])
 })
 
 test('activity on: two interleaved workers keep their own calls and touch nothing else of each other', ON, async ($, on) => {
@@ -414,7 +439,7 @@ for (const [name, input, masked, secret] of MASKS) {
   })
 }
 
-const BENIGN = ['mkdir -p src/x', 'git log -p', 'echo $HOME', 'npm test', 'cat keyboard.ts', 'mysql -u root mydb', 'ls /Users/shreyash/Documents/claude-kit-v2/plugins']
+const BENIGN = ['mkdir -p src/x', 'git log -p', 'echo $HOME', 'npm test', 'cat keyboard.ts', 'mysql -u root mydb']
 
 for (const command of BENIGN) {
   test(`activity on: "${command}" is left as it is`, ON, async ($, on) => {
