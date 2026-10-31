@@ -366,9 +366,8 @@ test('unseen: a completion writes crewBand only on a real transition of a tracke
   const mid = w()
   await finish($, 'a3') // unseen: one write
   expect(w()).toBe(mid + 1)
-  await finish($, 'a3') // finishes again while already unseen
   await finish($, 'ghost')
-  expect(w()).toBe(mid + 1)
+  expect(w()).toBe(mid + 1) // an untracked run, still nothing
 })
 
 // A completion that has read the pane list and waits: `finishing` resolves when released.
@@ -416,15 +415,33 @@ for (const surface of SURFACES) {
     expect(await labelNow($, surface)).toBeUndefined()
   })
 
-  test(`${surface}: unseen: a slow completion cannot make results unseen that the panel showed while it waited`, UNSEEN, async ($, on) => {
+  // Any gap fails toward showing the band (an extra ✕), never toward hiding an unseen result.
+  test(`${surface}: unseen: a slow completion that read the pane closed brings the band back even if the panel showed its result meanwhile`, UNSEEN, async ($, on) => {
     const pane = setup(on)
     await spawn($, 'a1')
-    const release = await paused($, pane, 'a1') // a1's result is in the list; its pane read said closed
+    const release = await paused($, pane, 'a1') // its pane read said closed
     await spawn($, 'a2')
     await finish($, 'a2')
-    await openByCommand($) // the panel shows both results
+    await openByCommand($) // the panel shows both results, then closes
     pane.isOpen = false
     await release()
-    expect(await labelNow($, surface)).toBeUndefined()
+    expect(await labelNow($, surface)).toBe(SHOWN)
+  })
+
+  test(`${surface}: unseen: an open that is paused after it saw the pane drawn does not mark a result that came later`, UNSEEN, async ($, on) => {
+    const pane = setup(on)
+    await spawn($, 'a1')
+    await finish($, 'a1') // unseen
+    let release = () => {}
+    pane.hold = new Promise<void>(r => (release = r))
+    const reached = new Promise<void>(r => (pane.reached = r))
+    const opening = openByCommand($) // marks seen: has read the results and the pane, waits
+    await reached
+    pane.isOpen = false
+    await spawn($, 'a2')
+    await finish($, 'a2') // pane closed: a new unseen result
+    release()
+    await opening
+    expect(await labelNow($, surface)).toBe(SHOWN)
   })
 }

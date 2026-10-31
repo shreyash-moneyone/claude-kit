@@ -1144,16 +1144,21 @@ async function togglePane($: EngineInterface, isActivity = false): Promise<boole
 
 // `band: "unseen"`: every change of the band's state is one `update` that decides from what it finds there, numbered by
 // a counter that only grows (clock times can tie, and reads and writes interleave). Results are unseen when the last
-// run's end (`doneSeq`) is newer than the last time the panel was drawn up (`seenSeq`).
+// run's end (`doneSeq`) is newer than the last time the panel was drawn up (`seenSeq`). Where a gap remains, it fails
+// toward showing the band (an extra ✕), never toward hiding a result that was not seen.
 const isUnseen = (b: CrewBand): boolean => b.doneSeq !== undefined && b.doneSeq > (b.seenSeq ?? -1)
 
 // A new run, or a finished one running again: the band comes back; what is unseen stays so.
 const renewed = (prev: CrewBand): CrewBand => ({ ...prev, isDismissed: false, seq: (prev.seq ?? 0) + 1 })
 
-// The panel shows the results now: written only when some were unseen, and only for a pane that is drawn.
+// The panel shows the results now: written only when some were unseen, only for a pane that is drawn, and only up to
+// the results the read found (one that lands while this waits stays unseen).
 async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<void> {
-  if (options.band !== 'unseen' || !isPlaced || !isUnseen(await read($, crewBand)) || !(await isPanePlaced($))) return
-  await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seq: (prev.seq ?? 0) + 1, seenSeq: (prev.seq ?? 0) + 1 } : prev))
+  if (options.band !== 'unseen' || !isPlaced) return
+  const observed = await read($, crewBand)
+  if (!isUnseen(observed) || !(await isPanePlaced($))) return
+  const upTo = observed.doneSeq as number
+  await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seq: (prev.seq ?? 0) + 1, seenSeq: Math.max(prev.seenSeq ?? -1, upTo) } : prev))
 }
 
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
@@ -1429,8 +1434,6 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId
     if (agentId) {
       const at = await $.clock.now()
-      // `band: "unseen"`: where the band's counter stood before the list changed (the panel redraws from that change on).
-      const startSeq = options.band === 'unseen' ? ((await read($, crewBand)).seq ?? 0) : 0
       await update($, agents, list =>
         list.map((a): AgentRun => {
           if (a.agentId !== agentId) return a
@@ -1457,17 +1460,18 @@ export const register: Register = (on, options) => {
       )
       await update($, now, () => at)
       // `band: "unseen"`: the last one to finish leaves its results seen if the panel is up, unseen if not. A panel drawn
-      // at this moment shows the result (it redraws as the list changes), even if it closes before the write below; one
-      // drawn up since the list changed (`seenSeq` past `startSeq`) showed it too. Only a tracked run's completion counts.
+      // at this moment shows the result (it redraws as the list changes), even if it closes before the write below. A
+      // pane read as closed stays unseen even if it opens before the write: the fail-safe side. Only a tracked run counts.
       const runs = await read($, agents)
       if (options.band === 'unseen' && runs.some(a => a.agentId === agentId) && !runs.some(a => a.status === 'running')) {
         const isPlaced = await isPanePlaced($)
         const found = await read($, crewBand)
-        // The read only skips what would change nothing; the update below is right without it.
-        if (isPlaced === isUnseen(found)) {
+        // The read only skips a panel drawn over results already seen; with the pane closed this always writes, so a
+        // result that lands while an open waits to mark the older ones is recorded as newer than they are.
+        if (!isPlaced || isUnseen(found)) {
           await update($, crewBand, prev => {
             const s = (prev.seq ?? 0) + 1
-            return { ...prev, seq: s, doneSeq: s, seenSeq: isPlaced || (prev.seenSeq ?? -1) > startSeq ? s : prev.seenSeq }
+            return { ...prev, seq: s, doneSeq: s, seenSeq: isPlaced ? s : prev.seenSeq }
           })
         }
         // A pane that opened while this ran found nothing unseen yet.
