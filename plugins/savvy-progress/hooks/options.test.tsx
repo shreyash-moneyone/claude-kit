@@ -5,7 +5,7 @@ import type { Engine } from 'claude-code/testing'
 const PLUGIN = 'savvy-progress'
 const MODEL = 'claude-sonnet-5-5'
 const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
-const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const band = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
 const SURFACES = ['terminal', 'desktop'] as const
 
 // What sits beneath the plugin's band: an empty row, so a band the plugin declines to draw mounts as that.

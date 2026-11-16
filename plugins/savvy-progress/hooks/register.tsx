@@ -1192,8 +1192,9 @@ async function stateReadout($: EngineInterface, options: Record<string, unknown>
     listed = JSON.stringify(
       panes.map(p => Object.fromEntries(Object.entries(p).filter(([k, v]) => k === 'id' || typeof v === 'boolean' || typeof v === 'number'))),
     )
-  } catch (err) {
-    listed = `error: ${err instanceof Error ? err.message : String(err)}`
+  } catch {
+    // A fixed marker: the error's own text could carry pane titles.
+    listed = 'error'
   }
   const count = (s: string) => all.filter(a => a.status === s).length
   const running = all.filter(a => a.status === 'running').map(a => a.agentId ?? a.id)

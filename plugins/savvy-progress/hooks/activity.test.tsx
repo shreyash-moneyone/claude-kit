@@ -553,7 +553,7 @@ test('activity on: a step note is clipped to 80 characters, masked first', ON, a
 
 const PANE = 'savvy-agents'
 const pane = { title: '', isFocused: false, bodyColumns: 60, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
-const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const band = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
 const SURFACES = ['terminal', 'desktop'] as const
 type Surface = (typeof SURFACES)[number]
 
@@ -1273,7 +1273,7 @@ test('flow: a planned title with a control character matches the agent described
   expect(await plannedCount($)).toEqual([])
 })
 
-const BAND = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const BAND = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
 
 for (const surface of SURFACES) {
   test(`${surface}: state stored by an earlier version with control characters in its texts still draws, clean`, async ($, on) => {

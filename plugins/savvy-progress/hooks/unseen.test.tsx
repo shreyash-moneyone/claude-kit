@@ -5,7 +5,7 @@ import type { Engine } from 'claude-code/testing'
 const PLUGIN = 'savvy-progress'
 const PANE = 'savvy-agents'
 const MODEL = 'claude-sonnet-5-5'
-const band = { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
+const band = { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 4, bodyColumns: 100, scroll: { offset: 0, bodyRows: 4 }, view: {} } as const
 const SURFACES = ['terminal', 'desktop'] as const
 type Surface = (typeof SURFACES)[number]
 const UNSEEN = { options: { band: 'unseen' } } as const

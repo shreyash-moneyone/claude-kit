@@ -33,7 +33,9 @@ const finish = async ($: Engine, id: string) => {
 }
 const stateOf = async ($: Engine) => ((await $.command.run({ command: 'agents-info', args: 'state' } as never)) as { text: string }).text
 
-test('state: the readout carries the version, equal to the VERSION constant', UNSEEN, async ($, on) => {
+// Not testable here: the runner loads only code modules (a JSON import is refused: "is not named like code") and a test has no fs.
+// Keep VERSION in register.tsx equal to `version` in .claude-plugin/plugin.json by hand (`claude plugin validate` shows the manifest's).
+test('state: the readout\'s first line carries the version', UNSEEN, async ($, on) => {
   setup(on)
   const text = await stateOf($)
   expect(text.split('\n')[0]).toBe(`savvy-progress ${VERSION}`)
@@ -82,12 +84,27 @@ test('state: counts by status and lists only the running agentIds', UNSEEN, asyn
 
 test('state: a throwing ui.panes prints an error line', UNSEEN, async ($, on) => {
   setup(on, null)
+  on('ui.panes', () => {
+    throw new Error('LEAK-SECRET-TITLE')
+  })
   const text = await stateOf($)
-  expect(text).toContain('panes: error: ')
+  expect(text).toContain('panes: error\n')
+  expect(text).not.toContain('LEAK-SECRET-TITLE')
+  expect(text).not.toContain('no implementation')
   expect(text).toContain('isPaneOpen: false')
 })
 
 test('state: ribbon hidden when nothing is unseen and nothing runs', UNSEEN, async ($, on) => {
   setup(on)
   expect(await stateOf($)).toContain('ribbon: hidden')
+})
+
+test('state: a finished run seen with a placed pane open reads unseen false and ribbon hidden', UNSEEN, async ($, on) => {
+  setup(on, [{ id: PANE, isPlaced: true }])
+  await spawn($, 'a1')
+  await finish($, 'a1')
+  const text = await stateOf($)
+  expect(text).toContain('total 1 running 0 done 1')
+  expect(text).toContain('unseen: false')
+  expect(text).toContain('ribbon: hidden')
 })
