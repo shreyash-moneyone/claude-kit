@@ -15,6 +15,9 @@ const cleared = atom({ plugin: 'savvy-progress', key: 'cleared' } as const, { id
 const rotation = atom({ plugin: 'savvy-progress', key: 'rotation' } as const, { next: 0 } as Rotation)
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
 
+// Keep in step with `version` in .claude-plugin/plugin.json (the `/agents-info state` readout prints it).
+export const VERSION = '1.5.4'
+
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
 // Added to the end of each savvy worker's brief. Their system prompt words step
@@ -1151,6 +1154,15 @@ const isUnseen = (b: CrewBand): boolean => b.doneSeq !== undefined && b.doneSeq 
 // A new run, or a finished one running again: the band comes back; what is unseen stays so.
 const renewed = (prev: CrewBand): CrewBand => ({ ...prev, isDismissed: false, seq: (prev.seq ?? 0) + 1 })
 
+// Whether the band is drawn (a survey on screen aside): a flow shows it; with `band: "agents"` and no flow, a compact band
+// shows once any subagent has run, until its ✕; with `"unseen"` it also goes once nothing runs and the results were seen.
+// One place for the render and the `/agents-info state` readout, so the two cannot drift.
+const isRibbonShown = (band: unknown, f: Flow | null, all: AgentRun[], crew: CrewBand): boolean => {
+  if (f !== null) return true
+  if (band !== 'agents' && band !== 'unseen') return false
+  return all.length > 0 && !crew.isDismissed && (band !== 'unseen' || all.some(a => a.status === 'running') || isUnseen(crew))
+}
+
 // The panel shows the results now: written only when some were unseen, only for a pane that is drawn, and only up to
 // the results the read found (one that lands while this waits stays unseen).
 async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<void> {
@@ -1166,6 +1178,37 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
   void $.ui.open({ id: PANE, title: tr().pane })
+}
+
+// `/agents-info state`: the band's runtime state as plain text, for a bug report. Reads only; no titles, briefs or results.
+async function stateReadout($: EngineInterface, options: Record<string, unknown>): Promise<string> {
+  const crew = await read($, crewBand)
+  const all = await read($, agents)
+  const f = await read($, flow)
+  const ids = clearedIds(await read($, cleared))
+  let listed: string
+  try {
+    const panes = (await $.ui.panes()) as unknown as Record<string, unknown>[]
+    listed = JSON.stringify(
+      panes.map(p => Object.fromEntries(Object.entries(p).filter(([k, v]) => k === 'id' || typeof v === 'boolean' || typeof v === 'number'))),
+    )
+  } catch (err) {
+    listed = `error: ${err instanceof Error ? err.message : String(err)}`
+  }
+  const count = (s: string) => all.filter(a => a.status === s).length
+  const running = all.filter(a => a.status === 'running').map(a => a.agentId ?? a.id)
+  const band = options.band as string | undefined
+  return [
+    `savvy-progress ${VERSION}`,
+    `options: band=${options.band} finished=${options.finished} autoOpen=${options.autoOpen} activity=${options.activity}`,
+    `crewBand: ${JSON.stringify(crew)} unseen: ${isUnseen(crew)}`,
+    `agents: total ${all.length} running ${count('running')} done ${count('done')} failed ${count('failed')} cleared ${ids.length}`,
+    `running ids: ${running.length ? running.join(', ') : 'none'}`,
+    `flow: ${f === null ? 'none' : f.isFinished ? 'finished' : 'active'}`,
+    `panes: ${listed}`,
+    `isPaneOpen: ${await isPaneOpen($)} isPanePlaced: ${await isPanePlaced($)}`,
+    `ribbon: ${isRibbonShown(band, f, all, crew) ? 'shown' : 'hidden'} (a survey on screen aside)`,
+  ].join('\n')
 }
 
 export const register: Register = (on, options) => {
@@ -1224,7 +1267,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'agents-info',
-      description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
+      description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time; `open` opens it, `state` prints the band\'s runtime state',
     })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
@@ -1240,6 +1283,8 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
+    // `/agents-info state` reads the runtime state out as text: it opens, closes and writes nothing.
+    if ((e.args ?? '').trim() === 'state') return { text: await stateReadout($, options as Record<string, unknown>) }
     // `/agents-info open` opens the panel, or brings it forward from behind another tab, without toggling it.
     if ((e.args ?? '').trim() === 'open') {
       const at = await $.clock.now()
@@ -1731,9 +1776,7 @@ export const register: Register = (on, options) => {
     // With `band: "agents"` and no flow, a compact band shows once any subagent has run, until its ✕. With `"unseen"` it
     // also goes once nothing runs and the panel has shown the results.
     const crew = await read($, crewBand)
-    const isCrewOnly =
-      f === null && all.length > 0 && !crew.isDismissed && (options.band !== 'unseen' || all.some(a => a.status === 'running') || isUnseen(crew))
-    if (f === null && !isCrewOnly) return next(e)
+    if (!isRibbonShown(options.band, f, all, crew)) return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)

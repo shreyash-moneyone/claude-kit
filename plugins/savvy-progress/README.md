@@ -5,6 +5,8 @@ A Claude Code mod: a progress bar above the prompt and a live panel of subagents
 - **Progress bar**: the flow's title, phase, accepted tasks out of planned, and a `Show panel ▸` / `Hide panel ◂` button for the agents panel. It appears once something reports progress (savvy-flow does) or a `savvy-*` worker starts (with the `band` option, also for any subagent).
 - **Agents panel** (`/agents-info` toggles it; `/agents-info open` opens it or brings it forward without toggling): running, finished and planned subagents with model, effort, task progress, context, estimated cost and time. Working crabs walk, and each savvy tier animates its prop: the astronaut floats, the detective sweeps the magnifier, the engineer turns the wrench, the chef tosses the omelette, the racer runs with a fluttering flag. `prefers-reduced-motion` stops them.
 
+- **Diagnostics**: `/agents-info state` prints the band's runtime state (version, options, stored band state, agent counts and running ids, pane list, whether the ribbon shows) without opening, closing or writing anything; no agent texts.
+
 ## Tools it adds
 
 - `mcp__savvy-progress__progress`: the orchestrator reports the plan, phase and accepted tasks. Only the main session can: a call from a subagent is ignored, so a worker cannot rename, finish or reset the flow.
