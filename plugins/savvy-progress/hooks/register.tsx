@@ -1119,11 +1119,12 @@ const isPaneOpen = async ($: EngineInterface): Promise<boolean> => {
 
 // Whether the person can see the pane right now: listed, drawn (`isPlaced`: one that waits undrawn, as in a narrow window or
 // with no surface attached, has shown nothing) and the one the surface shows (`isShown`: the rest are tabs behind it).
-// A field the engine leaves out counts as true, for older engines and mocks. The one test for "seen", used by the
-// completion and by `markSeen`; a `ui.panes` failure reads as not visible.
+// Both must be reported true: a field the engine leaves out is not known to be on screen, and a result that was not on
+// screen must never read as seen. The one test for "seen", used by the completion and by `markSeen`; a `ui.panes`
+// failure reads as not visible.
 const isPaneSeenable = async ($: EngineInterface): Promise<boolean> => {
   try {
-    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced !== false && p.isShown !== false)
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced === true && p.isShown === true)
   } catch {
     return false
   }

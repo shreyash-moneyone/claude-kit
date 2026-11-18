@@ -20,7 +20,7 @@ const setup = (on: On) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const pane = {
     listed: true,
-    isPlaced: true,
+    isPlaced: true as boolean | undefined,
     isShown: true as boolean | undefined,
     calls: 0,
     throws: false,
@@ -37,7 +37,7 @@ const setup = (on: On) => {
   on('ui.panes', async () => {
     pane.calls++
     if (pane.throws) throw new Error('boom')
-    const listed = pane.listed ? [{ id: PANE, isPlaced: pane.isPlaced, ...(pane.isShown === undefined ? {} : { isShown: pane.isShown }) }] : []
+    const listed = pane.listed ? [{ id: PANE, ...(pane.isPlaced === undefined ? {} : { isPlaced: pane.isPlaced }), ...(pane.isShown === undefined ? {} : { isShown: pane.isShown }) }] : []
     const hold = pane.hold
     pane.hold = undefined
     if (hold) pane.reached()
@@ -87,13 +87,14 @@ const unseenResult = async ($: Engine, pane: ReturnType<typeof setup>, id = 'a1'
   await finish($, id)
 }
 
+// Pane visibility is mocked: these tests prove the mod's reaction to the reported visibility, not the engine's per-surface reporting.
 for (const surface of SURFACES) {
   test(`${surface}: attach after the pane became placed and shown clears an unseen ribbon (S1)`, UNSEEN, async ($, on) => {
     const pane = setup(on)
     await unseenResult($, pane)
     expect(await labelNow($, surface)).toBe(SHOWN)
     pane.isPlaced = true
-    await attach($)
+    await attach($, surface)
     expect(await labelNow($, surface)).toBeUndefined()
   })
 
@@ -102,7 +103,7 @@ for (const surface of SURFACES) {
     await unseenResult($, pane)
     pane.isPlaced = true
     pane.isShown = false
-    await attach($)
+    await attach($, surface)
     expect(await labelNow($, surface)).toBe(SHOWN)
   })
 
@@ -110,7 +111,7 @@ for (const surface of SURFACES) {
     const pane = setup(on)
     await unseenResult($, pane)
     pane.listed = false
-    await attach($)
+    await attach($, surface)
     expect(await labelNow($, surface)).toBe(SHOWN)
   })
 
@@ -143,7 +144,7 @@ for (const surface of SURFACES) {
     await spawn($, 'a1')
     await finish($, 'a1')
     pane.isShown = true
-    await attach($)
+    await attach($, surface)
     expect(await labelNow($, surface)).toBeUndefined()
   })
 
@@ -154,7 +155,7 @@ for (const surface of SURFACES) {
     let release = () => {}
     pane.hold = new Promise<void>(r => (release = r))
     const reached = new Promise<void>(r => (pane.reached = r))
-    const attaching = attach($) // has read crewBand (a1 unseen), asks the pane list, waits
+    const attaching = attach($, surface) // has read crewBand (a1 unseen), asks the pane list, waits
     await reached
     pane.isPlaced = false
     await spawn($, 'a2')
@@ -248,25 +249,47 @@ test('state: the surface log keeps the newest 10 entries (S8)', UNSEEN, async ($
   expect(line).not.toContain('terminal')
 })
 
-test('state: stored state from before the log (no field) reads as empty and attach still works (S8)', UNSEEN, async ($, on) => {
-  setup(on)
-  on('state.get', { plugin: PLUGIN, key: 'surfaceLog' } as never, (() => ({ value: { value: undefined, version: 0 } })) as never)
-  await attach($)
+test('state: stored state from before the log (no field) reads as empty; attach records and still marks seen (S8)', UNSEEN, async ($, on) => {
+  const pane = setup(on)
+  // Only the first read answers as old state (no field); later reads and every write see the real store.
+  let first = true
+  on('state.get', { plugin: PLUGIN, key: 'surfaceLog' } as never, ((_$: unknown, e: unknown, next: (e: unknown) => unknown) => {
+    if (!first) return next(e)
+    first = false
+    return { value: { value: undefined, version: 0 } }
+  }) as never)
+  await unseenResult($, pane)
   expect(await stateOf($)).toContain('\nsurfaces: none')
+  pane.isPlaced = true
+  await attach($)
+  expect(await stateOf($)).toContain('\nsurfaces: attach desktop')
+  expect(await labelNow($, 'terminal')).toBeUndefined()
 })
 
-test('state: prints isPaneSeenable true only when placed and shown; absent fields count as true (S8)', UNSEEN, async ($, on) => {
+test('state: prints isPaneSeenable true only when placed and shown; a missing field is not visible (S8)', UNSEEN, async ($, on) => {
   const pane = setup(on)
   expect(await stateOf($)).toContain('isPaneSeenable: true')
   pane.isShown = false
   expect(await stateOf($)).toContain('isPaneSeenable: false')
-  pane.isShown = undefined
-  expect(await stateOf($)).toContain('isPaneSeenable: true')
+  pane.isShown = undefined // no isShown reported: not known to be on screen
+  expect(await stateOf($)).toContain('isPaneSeenable: false')
+  pane.isShown = true
+  pane.isPlaced = undefined // no isPlaced reported
+  expect(await stateOf($)).toContain('isPaneSeenable: false')
   pane.isPlaced = false
   expect(await stateOf($)).toContain('isPaneSeenable: false')
   pane.isPlaced = true
   pane.listed = false
   expect(await stateOf($)).toContain('isPaneSeenable: false')
+})
+
+test('unseen: a pane entry without isPlaced or isShown never marks a result seen', UNSEEN, async ($, on) => {
+  const pane = setup(on)
+  await unseenResult($, pane)
+  pane.isPlaced = undefined
+  pane.isShown = undefined
+  await attach($)
+  expect(await labelNow($, 'terminal')).toBe(SHOWN)
 })
 
 test('unseen: a throwing ui.panes counts as not visible on attach and on the timer', UNSEEN, async ($, on) => {

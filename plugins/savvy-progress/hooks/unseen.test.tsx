@@ -29,7 +29,7 @@ const setup = (on: On) => {
   })
   on('ui.close', () => ((pane.isOpen = false), { value: undefined }) as never)
   on('ui.panes', async () => {
-    const listed = pane.isOpen ? [{ id: PANE, isPlaced: pane.isPlaced }] : []
+    const listed = pane.isOpen ? [{ id: PANE, isPlaced: pane.isPlaced, isShown: true }] : []
     const hold = pane.hold
     pane.hold = undefined
     if (hold) pane.reached()

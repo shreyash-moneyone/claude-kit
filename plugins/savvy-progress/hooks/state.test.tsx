@@ -42,7 +42,7 @@ test('state: the readout\'s first line carries the version', UNSEEN, async ($, o
 })
 
 test('state: does not toggle the pane and writes nothing', UNSEEN, async ($, on) => {
-  const seen = setup(on, [{ id: PANE, isPlaced: true }])
+  const seen = setup(on, [{ id: PANE, isPlaced: true, isShown: true }])
   await spawn($, 'a1')
   const writesBefore = seen.writes.length
   await stateOf($)
@@ -100,7 +100,7 @@ test('state: ribbon hidden when nothing is unseen and nothing runs', UNSEEN, asy
 })
 
 test('state: a finished run seen with a placed pane open reads unseen false and ribbon hidden', UNSEEN, async ($, on) => {
-  setup(on, [{ id: PANE, isPlaced: true }])
+  setup(on, [{ id: PANE, isPlaced: true, isShown: true }])
   await spawn($, 'a1')
   await finish($, 'a1')
   const text = await stateOf($)
