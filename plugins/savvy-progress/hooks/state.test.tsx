@@ -62,7 +62,7 @@ test('state: a finished, unseen run with an undrawn pane shows the flag, pane fi
   expect(text).toContain('"isPlaced":false')
   expect(text).toContain('"isPlaced":true')
   expect(text).toContain('isPaneOpen: true')
-  expect(text).toContain('isPanePlaced: false')
+  expect(text).toContain('isPaneSeenable: false')
   expect(text).toContain('total 1')
   expect(text).toContain('done 1')
   expect(text).toContain('flow: none')

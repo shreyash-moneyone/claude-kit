@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRun, Cleared, CrewBand, Flow, Panel, Phase, PlannedTask, Rotation } from '../types'
+import type { AgentRun, Cleared, CrewBand, Flow, Panel, Phase, PlannedTask, Rotation, SurfaceEvent } from '../types'
 
 const flow = atom({ plugin: 'savvy-progress', key: 'flow' } as const, null)
 const agents = atom({ plugin: 'savvy-progress', key: 'agents' } as const, [])
@@ -14,9 +14,10 @@ const crewBand = atom({ plugin: 'savvy-progress', key: 'crewBand' } as const, { 
 const cleared = atom({ plugin: 'savvy-progress', key: 'cleared' } as const, { ids: [] } as Cleared)
 const rotation = atom({ plugin: 'savvy-progress', key: 'rotation' } as const, { next: 0 } as Rotation)
 const now = atom({ plugin: 'savvy-progress', key: 'now' } as const, 0)
+const surfaceLog = atom({ plugin: 'savvy-progress', key: 'surfaceLog' } as const, [] as SurfaceEvent[])
 
 // Keep in step with `version` in .claude-plugin/plugin.json (the `/agents-info state` readout prints it).
-export const VERSION = '1.5.4'
+export const VERSION = '1.5.5'
 
 const TOOL = 'mcp__savvy-progress__progress'
 const STEP_TOOL = 'mcp__savvy-progress__step'
@@ -1116,10 +1117,13 @@ const isPaneOpen = async ($: EngineInterface): Promise<boolean> => {
   }
 }
 
-// Whether the pane is drawn: one that waits undrawn (a narrow window, `isPlaced` false) has shown the person nothing.
-const isPanePlaced = async ($: EngineInterface): Promise<boolean> => {
+// Whether the person can see the pane right now: listed, drawn (`isPlaced`: one that waits undrawn, as in a narrow window or
+// with no surface attached, has shown nothing) and the one the surface shows (`isShown`: the rest are tabs behind it).
+// A field the engine leaves out counts as true, for older engines and mocks. The one test for "seen", used by the
+// completion and by `markSeen`; a `ui.panes` failure reads as not visible.
+const isPaneSeenable = async ($: EngineInterface): Promise<boolean> => {
   try {
-    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced !== false)
+    return (await $.ui.panes()).some(p => p.id === PANE && p.isPlaced !== false && p.isShown !== false)
   } catch {
     return false
   }
@@ -1164,13 +1168,14 @@ const isRibbonShown = (band: unknown, f: Flow | null, all: AgentRun[], crew: Cre
 }
 
 // The panel shows the results now: written only when some were unseen, only for a pane that is drawn, and only up to
-// the results the read found (one that lands while this waits stays unseen).
-async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<void> {
-  if (options.band !== 'unseen' || !isPlaced) return
+// the results the read found (one that lands while this waits stays unseen). True when it looked past the checks and wrote.
+async function markSeen($: EngineInterface, options: { band?: string }, isPlaced = true): Promise<boolean> {
+  if (options.band !== 'unseen' || !isPlaced) return false
   const observed = await read($, crewBand)
-  if (!isUnseen(observed) || !(await isPanePlaced($))) return
+  if (!isUnseen(observed) || !(await isPaneSeenable($))) return false
   const upTo = observed.doneSeq as number
   await update($, crewBand, prev => (isUnseen(prev) ? { ...prev, seq: (prev.seq ?? 0) + 1, seenSeq: Math.max(prev.seenSeq ?? -1, upTo) } : prev))
+  return true
 }
 
 async function autoOpen($: EngineInterface, key: string): Promise<void> {
@@ -1178,6 +1183,24 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
   void $.ui.open({ id: PANE, title: tr().pane })
+}
+
+const MAX_SURFACE_LOG = 10
+
+const clockTime = (at: number): string => {
+  const d = new Date(at)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+// One line, oldest first: `attach desktop 12:04:31 · detach desktop detach 12:05:10`. No client ids, no sizes.
+const surfacesLine = (log: SurfaceEvent[] | undefined): string =>
+  log?.length ? log.map(l => [l.kind, l.surface, l.reason, clockTime(l.at)].filter(Boolean).join(' ')).join(' · ') : 'none'
+
+// A diagnostic for the "pane stayed hidden after switching sessions" report: which surfaces came and went, and when.
+async function logSurface($: EngineInterface, entry: Omit<SurfaceEvent, 'at'>): Promise<void> {
+  const at = await $.clock.now()
+  await update($, surfaceLog, prev => [...(prev ?? []), { at, ...entry }].slice(-MAX_SURFACE_LOG))
 }
 
 // `/agents-info state`: the band's runtime state as plain text, for a bug report. Reads only; no titles, briefs or results.
@@ -1207,7 +1230,8 @@ async function stateReadout($: EngineInterface, options: Record<string, unknown>
     `running ids: ${running.length ? running.join(', ') : 'none'}`,
     `flow: ${f === null ? 'none' : f.isFinished ? 'finished' : 'active'}`,
     `panes: ${listed}`,
-    `isPaneOpen: ${await isPaneOpen($)} isPanePlaced: ${await isPanePlaced($)}`,
+    `surfaces: ${surfacesLine(await read($, surfaceLog))}`,
+    `isPaneOpen: ${await isPaneOpen($)} isPaneSeenable: ${await isPaneSeenable($)}`,
     `ribbon: ${isRibbonShown(band, f, all, crew) ? 'shown' : 'hidden'} (a survey on screen aside)`,
   ].join('\n')
 }
@@ -1271,16 +1295,34 @@ export const register: Register = (on, options) => {
       description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time; `open` opens it, `state` prints the band\'s runtime state',
     })
 
-    // Ticks the running agents' clocks; quiet when nothing runs.
+    // Ticks the running agents' clocks; with `band: "unseen"` it is also the backup for a missed `session.attach`.
     $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
-        if (!list.some(a => a.status === 'running')) return
+        if (!list.some(a => a.status === 'running')) {
+          // Backup for a missed `session.attach`: results unseen while the pane was not drawn clear once it is on screen.
+          // The cheap state read first; markSeen asks the pane list only when something is unseen.
+          if (options.band === 'unseen' && isUnseen(await read($, crewBand)) && (await markSeen($, options))) $.ui.invalidate('ui.render')
+          return
+        }
         const at = await $.clock.now()
         await update($, now, () => at)
       })()
     })
     return started
+  })
+
+  // The person came back to this session (or a surface connected): a pane that is up now shows the results.
+  on('session.attach', async ($, e, next) => {
+    const result = await next(e)
+    await logSurface($, { kind: 'attach', surface: e.surface })
+    if (await markSeen($, options)) $.ui.invalidate('ui.render')
+    return result
+  })
+
+  on('session.detach', async ($, e, next) => {
+    await logSurface($, { kind: 'detach', surface: e.surface, reason: e.reason })
+    return next(e)
   })
 
   on('command.run', { command: 'agents-info' }, async ($, e) => {
@@ -1511,7 +1553,7 @@ export const register: Register = (on, options) => {
       const runs = await read($, agents)
       if (options.band === 'unseen' && runs.some(a => a.agentId === agentId) && !runs.some(a => a.status === 'running')) {
         const found = await read($, crewBand)
-        const isPlaced = await isPanePlaced($)
+        const isPlaced = await isPaneSeenable($)
         // The read only skips a panel drawn over results already seen; with the pane closed this always writes, so a
         // result that lands while an open waits to mark the older ones is recorded as newer than they are.
         if (!isPlaced || isUnseen(found)) {

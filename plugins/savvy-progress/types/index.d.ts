@@ -75,6 +75,16 @@ export type CrewBand = {
   seenSeq?: number
 }
 
+/** One surface joining or leaving the session, kept for `/agents-info state`. No client id, no sizes. */
+export type SurfaceEvent = {
+  /** Mod clock, in milliseconds. */
+  at: number
+  kind: 'attach' | 'detach'
+  surface?: string
+  /** A detach: why the surface left. */
+  reason?: string
+}
+
 /** `finished: "clear-on-close"`: ids of the runs that had finished when the panel last closed; they are not listed. */
 export type Cleared = {
   ids: string[]
@@ -95,6 +105,8 @@ declare module 'claude-code' {
       cleared: Cleared
       rotation: Rotation
       now: number
+      /** The last 10 `session.attach` / `session.detach` events, newest last; state from before it reads as empty. */
+      surfaceLog: SurfaceEvent[]
     }
   }
 }
